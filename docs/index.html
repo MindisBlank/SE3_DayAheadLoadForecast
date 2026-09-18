@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SE3 Day-Ahead Load Forecast</title>
+<meta name="description" content="A day-ahead hourly electricity load forecast for Swedish bidding zone SE3, published before the fact and scored against what happened.">
+<style>
+  :root {
+    color-scheme: light;
+    --surface-0: #f4f3f0;
+    --surface-1: #fcfcfb;
+    --border: #e2e0da;
+    --grid: #ecebe7;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #7a7974;
+    --actual: #0b0b0b;
+    --series-1: #2a78d6;   /* model    */
+    --series-2: #eb6834;   /* baseline */
+    --future: #eeedea;
+    --good: #0f7b3e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --surface-0: #111110;
+      --surface-1: #1a1a19;
+      --border: #2e2e2c;
+      --grid: #262624;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #8f8e86;
+      --actual: #f2f1ec;
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --future: #232322;
+      --good: #4cc27f;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-0: #111110; --surface-1: #1a1a19; --border: #2e2e2c; --grid: #262624;
+    --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+    --actual: #f2f1ec; --series-1: #3987e5; --series-2: #d95926; --future: #232322; --good: #4cc27f;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--surface-0); color: var(--text-primary);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 1040px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 26px; line-height: 1.2; margin: 0 0 6px; letter-spacing: -0.01em; }
+  h2 { font-size: 16px; margin: 0 0 4px; }
+  .lede { color: var(--text-secondary); margin: 0 0 4px; max-width: 70ch; }
+  .meta { color: var(--text-muted); font-size: 13px; margin: 0 0 24px; }
+  .meta a { color: inherit; }
+
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+  .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .tile .label { color: var(--text-secondary); font-size: 13px; }
+  .tile .value { font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; margin-top: 2px; }
+  .tile .value small { font-size: 14px; font-weight: 500; color: var(--text-secondary); }
+  .tile .sub { color: var(--text-muted); font-size: 12px; margin-top: 2px; }
+  .tile .value.good { color: var(--good); }
+
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 18px 18px 12px; margin-bottom: 16px; }
+  .card .note { color: var(--text-muted); font-size: 13px; margin: 0 0 10px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--text-secondary); margin: 6px 0 4px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .key { width: 18px; height: 0; border-top: 2px solid; display: inline-block; }
+  .key.dashed { border-top-style: dashed; }
+  .chart { position: relative; }
+  .chart svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .empty { color: var(--text-muted); font-size: 14px; padding: 28px 0; text-align: center; }
+
+  .tip {
+    position: absolute; pointer-events: none; background: var(--surface-1); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px;
+    box-shadow: 0 4px 16px rgb(0 0 0 / .12); white-space: nowrap; opacity: 0; transition: opacity .08s;
+    font-variant-numeric: tabular-nums; z-index: 2;
+  }
+  .tip .t { color: var(--text-secondary); margin-bottom: 4px; }
+  .tip .row { display: flex; align-items: center; gap: 6px; }
+  .tip .row b { margin-left: auto; padding-left: 12px; font-weight: 600; }
+
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; margin-top: 8px; }
+  th, td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  th:first-child, td:first-child, th.l, td.l { text-align: left; }
+  th { color: var(--text-secondary); font-weight: 500; }
+  footer { color: var(--text-muted); font-size: 13px; margin-top: 24px; }
+  footer p { margin: 0 0 6px; max-width: 80ch; }
+
+  @media (max-width: 720px) {
+    .tiles { grid-template-columns: repeat(2, 1fr); }
+    h1 { font-size: 22px; }
+    .tile .value { font-size: 24px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>SE3 day-ahead load forecast</h1>
+  <p class="lede">Every morning an unattended job publishes tomorrow's hourly electricity load forecast for Swedish bidding zone SE3, then scores it against what actually happened. The comparison is a naive baseline: the same hour one week earlier.</p>
+  <p class="meta" id="meta">Loading…</p>
+
+  <section class="tiles" id="tiles"></section>
+
+  <section class="card">
+    <h2>Forecast vs actual, last 14 days and tomorrow</h2>
+    <p class="note">Hourly MW. The shaded area is published but not yet known. Times are Swedish local time.</p>
+    <div class="legend">
+      <span><i class="key" style="border-color:var(--actual)"></i>Actual</span>
+      <span><i class="key" style="border-color:var(--series-1)"></i>Model (LightGBM)</span>
+      <span><i class="key dashed" style="border-color:var(--series-2)"></i>Baseline (last week)</span>
+    </div>
+    <div class="chart" id="c-load"></div>
+  </section>
+
+  <section class="card">
+    <h2>Daily mean absolute error</h2>
+    <p class="note">MW per scored day. Lower is better.</p>
+    <div class="legend">
+      <span><i class="key" style="border-color:var(--series-1)"></i>Model</span>
+      <span><i class="key dashed" style="border-color:var(--series-2)"></i>Baseline</span>
+    </div>
+    <div class="chart" id="c-mae"></div>
+    <details>
+      <summary>Show scores as a table</summary>
+      <div class="scroll"><table id="t-daily"></table></div>
+    </details>
+  </section>
+
+  <section class="card">
+    <h2>Run log</h2>
+    <p class="note">What each daily run did, newest first. "baseline" means a data source was down and the job fell back.</p>
+    <div class="scroll"><table id="t-runs"></table></div>
+  </section>
+
+  <footer>
+    <p><b>Backtest</b> (held-out year Sep 2025–Aug 2026, observed temperature used as a perfect forecast, so optimistic): model MAE 306 MW (3.2 %) vs baseline 639 MW (6.6 %). The live numbers above use real SMHI forecasts and are the honest ones.</p>
+    <p>Data: ENTSO-E Transparency Platform (load), SMHI Open Data (temperature). Source and full forecast history in the repository.</p>
+  </footer>
+</main>
+
+<script>
+(() => {
+  const TZ = "Europe/Stockholm";
+  const NS = "http://www.w3.org/2000/svg";
+  const fmtMW = v => v == null ? "–" : Math.round(v).toLocaleString("en-US");
+  const fmtHour = new Intl.DateTimeFormat("en-GB", { timeZone: TZ, weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const fmtDay = new Intl.DateTimeFormat("en-GB", { timeZone: TZ, day: "numeric", month: "short" });
+  const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+  function el(tag, attrs = {}, parent) {
+    const e = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+
+  function niceTicks(min, max, count = 5) {
+    const span = max - min || 1;
+    const step0 = span / count, mag = 10 ** Math.floor(Math.log10(step0));
+    const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= step0);
+    const ticks = [];
+    for (let v = Math.ceil(min / step) * step; v <= max + 1e-9; v += step) ticks.push(v);
+    return ticks;
+  }
+
+  /* Generic multi-line chart with a crosshair tooltip.
+     series: [{key,label,color,dash,width}]  rows: [{x:Date, [key]:number|null}] */
+  function lineChart(host, rows, series, opts = {}) {
+    host.innerHTML = "";
+    if (!rows.length) { host.innerHTML = `<div class="empty">${opts.empty || "No data yet."}</div>`; return; }
+    const W = Math.max(300, host.clientWidth);            // draw at real pixel width: text stays 12px
+    const H = Math.round((opts.height || 320) * (W < 600 ? 0.85 : 1));
+    const m = { t: 12, r: 16, b: 28, l: W < 600 ? 44 : 52 };
+    const iw = W - m.l - m.r, ih = H - m.t - m.b;
+    const xs = rows.map(r => +r.x);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs);
+    const vals = rows.flatMap(r => series.map(s => r[s.key])).filter(v => v != null);
+    let y0 = Math.min(...vals), y1 = Math.max(...vals);
+    if (opts.zero) y0 = 0;
+    const pad = (y1 - y0) * 0.08 || 1; y1 += pad; if (!opts.zero) y0 -= pad;
+    const X = v => m.l + (x1 === x0 ? iw / 2 : (v - x0) / (x1 - x0) * iw);
+    const Y = v => m.t + ih - (v - y0) / (y1 - y0) * ih;
+
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": opts.aria || "" }, host);
+
+    if (opts.shadeFrom != null) {
+      const sx = X(+opts.shadeFrom);
+      el("rect", { x: sx, y: m.t, width: Math.max(0, m.l + iw - sx), height: ih, fill: "var(--future)" }, svg);
+      const t = el("text", { x: m.l + iw - 6, y: m.t + 16, "text-anchor": "end", fill: "var(--text-muted)", "font-size": 12 }, svg);
+      t.textContent = "Tomorrow";
+    }
+    for (const v of niceTicks(y0, y1)) {
+      el("line", { x1: m.l, x2: m.l + iw, y1: Y(v), y2: Y(v), stroke: "var(--grid)", "stroke-width": 1 }, svg);
+      const t = el("text", { x: m.l - 8, y: Y(v) + 4, "text-anchor": "end", fill: "var(--text-muted)", "font-size": 12 }, svg);
+      t.textContent = fmtMW(v);
+    }
+    let lastTick = -Infinity;
+    (opts.xTicks || []).forEach(v => {
+      if (X(+v) - lastTick < 64) return;                   // keep labels from colliding
+      lastTick = X(+v);
+      const t = el("text", { x: X(+v), y: H - 8, "text-anchor": "middle", fill: "var(--text-muted)", "font-size": 12 }, svg);
+      t.textContent = fmtDay.format(v);
+    });
+
+    for (const s of series) {
+      let d = "", pen = false;
+      rows.forEach(r => {
+        const v = r[s.key];
+        if (v == null) { pen = false; return; }
+        d += `${pen ? "L" : "M"}${X(+r.x).toFixed(1)},${Y(v).toFixed(1)}`; pen = true;
+      });
+      el("path", { d, fill: "none", stroke: `var(${s.color})`, "stroke-width": s.width || 2,
+                   "stroke-dasharray": s.dash ? "5 4" : "none", "stroke-linejoin": "round", "stroke-linecap": "round" }, svg);
+      if (opts.markers) rows.forEach(r => {
+        if (r[s.key] == null) return;
+        el("circle", { cx: X(+r.x), cy: Y(r[s.key]), r: 4, fill: `var(${s.color})`, stroke: "var(--surface-1)", "stroke-width": 2 }, svg);
+      });
+    }
+
+    // Hover layer: crosshair + tooltip, nearest row by x
+    const cross = el("line", { y1: m.t, y2: m.t + ih, stroke: "var(--text-muted)", "stroke-width": 1, opacity: 0 }, svg);
+    const dots = series.map(s => el("circle", { r: 4.5, fill: `var(${s.color})`, stroke: "var(--surface-1)", "stroke-width": 2, opacity: 0 }, svg));
+    const tip = document.createElement("div"); tip.className = "tip"; host.appendChild(tip);
+    const hit = el("rect", { x: m.l, y: m.t, width: iw, height: ih, fill: "transparent" }, svg);
+
+    function move(evt) {
+      const pt = svg.getBoundingClientRect();
+      const px = (evt.clientX - pt.left) * (W / pt.width);
+      const target = x0 + (px - m.l) / iw * (x1 - x0);
+      let best = rows[0];
+      for (const r of rows) if (Math.abs(+r.x - target) < Math.abs(+best.x - target)) best = r;
+      const cx = X(+best.x);
+      cross.setAttribute("x1", cx); cross.setAttribute("x2", cx); cross.setAttribute("opacity", .6);
+      series.forEach((s, i) => {
+        const v = best[s.key];
+        dots[i].setAttribute("opacity", v == null ? 0 : 1);
+        if (v != null) { dots[i].setAttribute("cx", cx); dots[i].setAttribute("cy", Y(v)); }
+      });
+      tip.innerHTML = `<div class="t">${opts.tipTitle ? opts.tipTitle(best) : fmtHour.format(best.x)}</div>` +
+        series.map(s => `<div class="row"><i class="key${s.dash ? " dashed" : ""}" style="border-color:var(${s.color})"></i>${s.label}<b>${fmtMW(best[s.key])} MW</b></div>`).join("") +
+        (opts.tipExtra ? opts.tipExtra(best) : "");
+      tip.style.opacity = 1;
+      const hostW = host.clientWidth, scale = pt.width / W;
+      let left = cx * scale + 14;
+      if (left + tip.offsetWidth > hostW) left = cx * scale - tip.offsetWidth - 14;
+      tip.style.left = `${Math.max(0, left)}px`;
+      tip.style.top = `${m.t * scale + 4}px`;
+    }
+    function leave() { tip.style.opacity = 0; cross.setAttribute("opacity", 0); dots.forEach(d => d.setAttribute("opacity", 0)); }
+    hit.addEventListener("pointermove", move);
+    hit.addEventListener("pointerdown", move);
+    hit.addEventListener("pointerleave", leave);
+  }
+
+  function table(elm, head, rows) {
+    elm.innerHTML = `<thead><tr>${head.map(h => `<th class="${h.l ? "l" : ""}">${h.t}</th>`).join("")}</tr></thead>` +
+      `<tbody>${rows.map(r => `<tr>${r.map((c, i) => `<td class="${head[i].l ? "l" : ""}">${c}</td>`).join("")}</tr>`).join("")}</tbody>`;
+  }
+
+  function tile(label, value, sub, cls = "") {
+    return `<div class="tile"><div class="label">${label}</div><div class="value ${cls}">${value}</div><div class="sub">${sub}</div></div>`;
+  }
+
+  function render(data) {
+    const s = data.summary || {};
+    document.getElementById("meta").innerHTML =
+      `Last updated ${data.updated_utc.replace("T", " ")} UTC · ${s.days_published || 0} forecasts published · ${s.days_scored || 0} scored`;
+
+    const tiles = document.getElementById("tiles");
+    if (s.days_scored) {
+      const imp = (1 - s.mae_model_7d / s.mae_baseline_7d) * 100;
+      tiles.innerHTML =
+        tile("Model MAE, last 7 days", `${fmtMW(s.mae_model_7d)} <small>MW</small>`, `all days: ${fmtMW(s.mae_model_all)} MW`) +
+        tile("Baseline MAE, last 7 days", `${fmtMW(s.mae_baseline_7d)} <small>MW</small>`, `all days: ${fmtMW(s.mae_baseline_all)} MW`) +
+        tile("Error reduction vs baseline", `${imp.toFixed(0)} <small>%</small>`, "last 7 days", imp > 0 ? "good" : "") +
+        tile("Days scored", `${s.days_scored}`, `${s.first_day} → ${s.last_day} · ${s.fallback_days} fallback`);
+    } else {
+      tiles.innerHTML = tile("Days scored", "0", "the first day is scored once its actual load is published") +
+        tile("Forecasts published", `${s.days_published || 0}`, "live, before the fact");
+      tiles.style.gridTemplateColumns = "repeat(2, 1fr)";
+    }
+
+    // Load chart
+    const hourly = (data.hourly || []).map(r => ({ ...r, x: new Date(r.time_utc) }));
+    const dates = [...new Set(hourly.map(r => r.target_date))];
+    const unknown = hourly.find(r => r.actual_mw == null && r.target_date === dates[dates.length - 1]);
+    const xTicks = dates.map(d => hourly.find(r => r.target_date === d).x);
+    lineChart(document.getElementById("c-load"), hourly, [
+      { key: "baseline_mw", label: "Baseline", color: "--series-2", dash: true },
+      { key: "forecast_mw", label: "Model", color: "--series-1" },
+      { key: "actual_mw", label: "Actual", color: "--actual", width: 2 },
+    ], {
+      aria: "Hourly SE3 load: actual, model forecast and baseline over the last 14 days and tomorrow",
+      shadeFrom: unknown ? unknown.x : null, xTicks,
+      tipExtra: r => r.method && r.method !== "model" ? `<div class="t" style="margin:4px 0 0">fallback: ${r.method}</div>` : "",
+      empty: "No forecasts published yet.",
+    });
+
+    // Daily MAE chart
+    const daily = (data.daily || []).map(r => ({ ...r, x: new Date(r.date + "T12:00:00Z") }));
+    lineChart(document.getElementById("c-mae"), daily, [
+      { key: "mae_baseline", label: "Baseline", color: "--series-2", dash: true },
+      { key: "mae_model", label: "Model", color: "--series-1" },
+    ], {
+      height: 240, zero: true, markers: daily.length <= 45,
+      aria: "Daily mean absolute error of the model and the baseline",
+      xTicks: daily.map(r => r.x),
+      tipTitle: r => `${r.date}${r.method !== "model" ? " · fallback" : ""}`,
+      empty: "The first day is scored once its actual load is published by ENTSO-E (the morning after).",
+    });
+
+    table(document.getElementById("t-daily"),
+      [{ t: "Date", l: 1 }, { t: "Method", l: 1 }, { t: "Hours" }, { t: "MAE model" }, { t: "MAE baseline" }, { t: "MAPE model" }, { t: "MAPE baseline" }, { t: "Bias model" }],
+      [...(data.daily || [])].reverse().map(r => [r.date, r.method, r.hours, fmtMW(r.mae_model), fmtMW(r.mae_baseline),
+        r.mape_model.toFixed(2) + " %", r.mape_baseline.toFixed(2) + " %", (r.bias_model > 0 ? "+" : "") + fmtMW(r.bias_model)]));
+
+    const runs = data.runs || [];
+    if (runs.length) table(document.getElementById("t-runs"),
+      [{ t: "Run (UTC)", l: 1 }, { t: "For", l: 1 }, { t: "Method", l: 1 }, { t: "Note", l: 1 }],
+      runs.map(r => [r.run_utc, r.target_date, r.method, r.note || ""]));
+    else document.getElementById("t-runs").outerHTML = `<div class="empty">No runs logged yet.</div>`;
+  }
+
+  let data, timer;
+  addEventListener("resize", () => { clearTimeout(timer); timer = setTimeout(() => data && render(data), 150); });
+  fetch("data.json", { cache: "no-store" })
+    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(d => { data = d; render(d); })
+    .catch(e => { document.getElementById("meta").textContent = `Could not load data.json (${e.message}).`; });
+})();
+</script>
+</body>
+</html>

@@ -6,8 +6,10 @@ scores can always be reproduced and a crashed run never leaves a half-written ta
 Outputs:
     scores/hourly.csv   one row per forecast hour with an actual value
     scores/daily.csv    one row per fully-observed target day: MAE/MAPE model vs baseline
+    docs/data.json      what the GitHub Pages chart reads
 Prints overall and rolling 7-day MAE.
 """
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -17,6 +19,46 @@ from features import load_hourly
 ROOT = Path(__file__).resolve().parent.parent
 FCST_DIR = ROOT / "forecasts"
 SCORE_DIR = ROOT / "scores"
+DOCS_DIR = ROOT / "docs"
+CHART_DAYS = 14
+
+
+def _records(df: pd.DataFrame) -> list[dict]:
+    """DataFrame -> JSON-safe records (NaN -> null)."""
+    return json.loads(df.to_json(orient="records", date_format="iso"))
+
+
+def write_site_data(fc: pd.DataFrame, daily: pd.DataFrame) -> None:
+    now = pd.Timestamp.now(tz="UTC")
+    dates = sorted(fc.target_date.unique())[-(CHART_DAYS + 1):]   # last 14 days + tomorrow
+    hourly = fc[fc.target_date.isin(dates)].reset_index()[
+        ["time_utc", "target_date", "actual_mw", "forecast_mw", "baseline_mw", "method"]]
+
+    summary = {"days_scored": int(len(daily)), "days_published": int(fc.target_date.nunique())}
+    if len(daily):
+        last7 = daily.tail(7)
+        summary.update({
+            "first_day": daily.date.iloc[0], "last_day": daily.date.iloc[-1],
+            "mae_model_7d": round(float(last7.mae_model.mean()), 1),
+            "mae_baseline_7d": round(float(last7.mae_baseline.mean()), 1),
+            "mae_model_all": round(float(daily.mae_model.mean()), 1),
+            "mae_baseline_all": round(float(daily.mae_baseline.mean()), 1),
+            "fallback_days": int((daily.method != "model").sum()),
+        })
+
+    log = FCST_DIR / "run_log.csv"
+    runs = pd.read_csv(log).tail(10).iloc[::-1] if log.exists() else pd.DataFrame()
+
+    DOCS_DIR.mkdir(exist_ok=True)
+    payload = {
+        "updated_utc": now.strftime("%Y-%m-%dT%H:%MZ"),
+        "summary": summary,
+        "hourly": _records(hourly),
+        "daily": _records(daily),
+        "runs": _records(runs),
+    }
+    (DOCS_DIR / "data.json").write_text(json.dumps(payload), encoding="utf-8")
+    print(f"Wrote {DOCS_DIR / 'data.json'}")
 
 
 def main() -> None:
@@ -38,12 +80,8 @@ def main() -> None:
     hourly.to_csv(SCORE_DIR / "hourly.csv")
 
     # A day counts only once every one of its hours has an actual value
-    g = fc.groupby("target_date")
-    complete = g["actual_mw"].apply(lambda s: s.notna().all())
+    complete = fc.groupby("target_date")["actual_mw"].apply(lambda s: s.notna().all())
     days = [d for d, ok in complete.items() if ok]
-    if not days:
-        print(f"{len(files)} forecast(s) published; none fully observed yet.")
-        return
 
     rows = []
     for d in days:
@@ -58,9 +96,16 @@ def main() -> None:
             "mape_baseline": (x.err_baseline.abs() / x.actual_mw).mean() * 100,
             "bias_model": x.err_model.mean(),
         })
-    daily = pd.DataFrame(rows).round(2)
+    cols = ["date", "method", "hours", "mae_model", "mae_baseline",
+            "mape_model", "mape_baseline", "bias_model"]
+    daily = pd.DataFrame(rows, columns=cols).round(2)
     daily.to_csv(SCORE_DIR / "daily.csv", index=False)
 
+    write_site_data(fc, daily)
+
+    if not days:
+        print(f"{len(files)} forecast(s) published; none fully observed yet.")
+        return
     h = hourly[hourly.target_date.isin(days)]
     last7 = h[h.target_date.isin(days[-7:])]
     print(f"Scored {len(days)} day(s): {days[0]} -> {days[-1]}")
