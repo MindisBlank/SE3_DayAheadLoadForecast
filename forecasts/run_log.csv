@@ -1,2 +1,3 @@
 run_utc,target_date,method,note
 2026-09-18T14:39Z,2026-09-19,model,trained on 32386 h; weather: smhi 2026-09-18T14:15:00Z
+2026-09-18T14:50Z,2026-09-19,exists,2026-09-19.csv already published
