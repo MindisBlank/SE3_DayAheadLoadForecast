@@ -1,0 +1,61 @@
+name: daily-forecast
+
+on:
+  schedule:
+    # 08:15 UTC = 10:15 Swedish summer time / 09:15 winter time, well before the
+    # 12:00 CET day-ahead gate closure. GitHub may start scheduled jobs a bit late.
+    - cron: "15 8 * * *"
+  workflow_dispatch: {}   # "Run workflow" button for manual runs
+
+permissions:
+  contents: write         # needed to commit the results back
+
+concurrency:
+  group: daily-forecast
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Data pulls may fail (APIs go down). The forecast step decides what to do
+      # with whatever data is available and logs it, so these never stop the job.
+      - name: Fetch load (ENTSO-E)
+        continue-on-error: true
+        env:
+          ENTSOE_API_TOKEN: ${{ secrets.ENTSOE_API_TOKEN }}
+        run: python src/fetch.py --update
+
+      - name: Fetch observed temperature (SMHI)
+        continue-on-error: true
+        run: python src/fetch_weather.py
+
+      - name: Forecast tomorrow
+        run: python src/forecast.py
+
+      - name: Score past forecasts
+        run: python src/score.py
+
+      - name: Commit results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add forecasts scores data
+          if git diff --cached --quiet; then
+            echo "Nothing to commit"
+          else
+            git commit -m "Daily run $(date -u +%Y-%m-%d)"
+            git pull --rebase
+            git push
+          fi

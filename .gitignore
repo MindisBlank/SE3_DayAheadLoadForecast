@@ -1,3 +1,10 @@
+
+#Personal Files
+PersonalFiles
+Claude outputs
+
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -216,3 +223,26 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ------------------------------------------------------------------
+# SE3 project
+# Committed on purpose (the daily job needs them, or they ARE the portfolio):
+#   data/load_se3_all.csv   data/temp_obs_*.csv   data/smhi_forecast/
+#   forecasts/   scores/
+# ------------------------------------------------------------------
+
+# One-off load pulls from `fetch.py --start/--end`; merged into load_se3_all.csv
+data/load_se3_2*.csv
+
+# Reproducible with `python src/model.py`
+backtest/
+
+# Retrained every run; `model.py --final` output is only for local use
+models/
+
+# Editors and OS clutter
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store

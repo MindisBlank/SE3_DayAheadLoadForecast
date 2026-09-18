@@ -1,0 +1,5 @@
+entsoe-py
+pandas
+python-dotenv
+requests
+lightgbm
