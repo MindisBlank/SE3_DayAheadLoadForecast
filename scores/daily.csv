@@ -1,1 +1,2 @@
 date,method,hours,mae_model,mae_baseline,mape_model,mape_baseline,bias_model
+2026-09-19,model,24,223.38,194.82,2.81,2.58,-175.1
