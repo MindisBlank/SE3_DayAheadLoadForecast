@@ -12,7 +12,8 @@ Fallback chain (every run logs which path it took in forecasts/run_log.csv):
   4. skipped  - not even last week's load is available; nothing is published
 
 Each forecast records `model_version` and `before_gate_closure` (issued before 12:00
-Swedish time on the day before, when the day-ahead market closes).
+Swedish time on the day before, when the day-ahead market closes). Model forecasts also
+carry an 80 % range: p10_mw and p90_mw (quantile models, see model.py).
 
 A forecast file is never overwritten: it is the public record of what was predicted
 before the fact. Re-running on the same day logs "exists" and does nothing.
@@ -33,7 +34,7 @@ from features import (LOCAL_TZ, MIN_COVERAGE, DATA_DIR, load_hourly, make_featur
                       regional_obs_hourly, temp_hourly, weighted_temperature)
 from fetch_weather import (REGIONAL_FCST_DIR, fetch_forecast, fetch_regional_forecast,
                            load_regional_forecast, parse_forecast)
-from model import FEATURES, VERSIONS, train
+from model import FEATURES, VERSIONS, fit_predict_all
 
 ROOT = Path(__file__).resolve().parent.parent
 FCST_DIR = ROOT / "forecasts"
@@ -164,7 +165,7 @@ def main() -> None:
         return
     lag48_ok = load.shift(48, freq="h").reindex(hours).notna().all()
 
-    notes, pred, version, weather_src, temp_used = [], None, None, "none", None
+    notes, rng, version, weather_src, temp_used = [], None, None, "none", None
 
     if not lag48_ok:
         notes.append(f"load data stale (ends {load.index.max()})")
@@ -185,14 +186,14 @@ def main() -> None:
                     notes.append("v2 skipped: regional temperature has gaps in the target day")
                 else:
                     train_df = make_features(load, weighted_temperature(obs)[0], load.index)
-                    pred = pd.Series(train(train_df).predict(X[FEATURES]), index=hours)
+                    rng = fit_predict_all(train_df, X)
                     version, weather_src, temp_used = VERSIONS["regional"], src, X["temp_c"]
                     notes.append(f"trained on {len(train_df.dropna(subset=FEATURES))} h")
         except (SystemExit, Exception) as e:   # no station list, bad file, ...: fall back, never crash
             notes.append(f"v2 skipped: {type(e).__name__}: {e}")
 
         # ---- 2. v1: Stockholm temperature
-        if pred is None:
+        if rng is None:
             s, src = stockholm_weather(hours, now, live, regional_seen)
             if s is None:
                 notes.append(f"v1 skipped: {src}")
@@ -204,17 +205,20 @@ def main() -> None:
                     notes.append("v1 skipped: Stockholm temperature has gaps in the target day")
                 else:
                     train_df = make_features(load, t_obs, load.index)
-                    pred = pd.Series(train(train_df).predict(X[FEATURES]), index=hours)
+                    rng = fit_predict_all(train_df, X)
                     version, weather_src, temp_used = VERSIONS["stockholm"], src, X["temp_c"]
                     notes.append(f"trained on {len(train_df.dropna(subset=FEATURES))} h")
 
     # ---- 3. baseline
-    method = "model" if pred is not None else "baseline"
-    if pred is None:
-        pred, version = baseline, "baseline"
+    method = "model" if rng is not None else "baseline"
+    if rng is None:   # baseline has no range: last week's value comes with no uncertainty estimate
+        rng = pd.DataFrame({"forecast_mw": baseline, "p10_mw": float("nan"), "p90_mw": float("nan")}, index=hours)
+        version = "baseline"
 
     result = pd.DataFrame({
-        "forecast_mw": pred.round(1),
+        "forecast_mw": rng["forecast_mw"].round(1),
+        "p10_mw": rng["p10_mw"].round(1),
+        "p90_mw": rng["p90_mw"].round(1),
         "baseline_mw": baseline.round(1),
         "temp_fc_c": (temp_used.round(1) if temp_used is not None else float("nan")),
         "method": method,
@@ -224,7 +228,7 @@ def main() -> None:
         "weather": weather_src,
     }, index=hours.rename("time_utc"))
 
-    print(result[["forecast_mw", "baseline_mw", "temp_fc_c"]].to_string())
+    print(result[["forecast_mw", "p10_mw", "p90_mw", "baseline_mw", "temp_fc_c"]].to_string())
     print(f"\n{date}: {len(hours)} h, {method} {version}, weather={weather_src}, "
           f"{'before' if on_time else 'AFTER'} gate closure ({gate_closure(date):%H:%M} UTC)")
     if not a.dry_run:

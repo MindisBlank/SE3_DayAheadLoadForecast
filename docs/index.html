@@ -71,6 +71,8 @@
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
   .key { width: 18px; height: 0; border-top: 2px solid; display: inline-block; }
   .key.dashed { border-top-style: dashed; }
+  .swatch { width: 18px; height: 10px; display: inline-block; border-radius: 2px;
+            background: color-mix(in srgb, var(--series-1) 22%, transparent); }
   .chart { position: relative; }
   .chart svg { display: block; width: 100%; height: auto; overflow: visible; }
   .empty { color: var(--text-muted); font-size: 14px; padding: 28px 0; text-align: center; }
@@ -116,6 +118,7 @@
     <div class="legend">
       <span><i class="key" style="border-color:var(--actual)"></i>Actual</span>
       <span><i class="key" style="border-color:var(--series-1)"></i>Model (LightGBM)</span>
+      <span><i class="swatch"></i>Model 80 % range (P10–P90)</span>
       <span><i class="key dashed" style="border-color:var(--series-2)"></i>Baseline (last week)</span>
     </div>
     <div class="chart" id="c-load"></div>
@@ -142,7 +145,7 @@
   </section>
 
   <footer>
-    <p><b>Model versions.</b> v1: Stockholm temperature only. v2 (from 23 Sep 2026): population-weighted temperature over nine SE3 cities. Each day's version is shown in the score table.</p>
+    <p><b>Model versions.</b> v1: Stockholm temperature only. v2 (from 23 Sep 2026): population-weighted temperature over nine SE3 cities. Each day's version is shown in the score table. The shaded band is the model's 80 % range (P10–P90): if it is well calibrated, about 8 in 10 hours land inside it.</p>
     <p><b>Backtest</b> (held-out year Sep 2025–Aug 2026, observed temperature used as a perfect forecast, so optimistic): v2 MAE 269 MW (2.9 %), v1 306 MW (3.2 %), baseline 639 MW (6.6 %). The live numbers above use real SMHI forecasts and are the honest ones.</p>
     <p>Data: ENTSO-E Transparency Platform (load), SMHI Open Data (temperature). Source and full forecast history in the repository.</p>
   </footer>
@@ -184,7 +187,8 @@
     const iw = W - m.l - m.r, ih = H - m.t - m.b;
     const xs = rows.map(r => +r.x);
     const x0 = Math.min(...xs), x1 = Math.max(...xs);
-    const vals = rows.flatMap(r => series.map(s => r[s.key])).filter(v => v != null);
+    const bandKeys = opts.band ? [opts.band.lo, opts.band.hi] : [];
+    const vals = rows.flatMap(r => [...series.map(s => r[s.key]), ...bandKeys.map(k => r[k])]).filter(v => v != null);
     let y0 = Math.min(...vals), y1 = Math.max(...vals);
     if (opts.zero) y0 = 0;
     const pad = (y1 - y0) * 0.08 || 1; y1 += pad; if (!opts.zero) y0 -= pad;
@@ -211,6 +215,21 @@
       const t = el("text", { x: X(+v), y: H - 8, "text-anchor": "middle", fill: "var(--text-muted)", "font-size": 12 }, svg);
       t.textContent = fmtDay.format(v);
     });
+
+    if (opts.band) {                                          // 80 % range: one polygon per unbroken run
+      const { lo, hi, color } = opts.band;
+      let run = [];
+      const flush = () => {
+        if (run.length > 1) {
+          const top = run.map(r => `${X(+r.x).toFixed(1)},${Y(r[hi]).toFixed(1)}`);
+          const bot = run.slice().reverse().map(r => `${X(+r.x).toFixed(1)},${Y(r[lo]).toFixed(1)}`);
+          el("path", { d: `M${top.join("L")}L${bot.join("L")}Z`, fill: `var(${color})`, "fill-opacity": 0.16, stroke: "none" }, svg);
+        }
+        run = [];
+      };
+      rows.forEach(r => (r[lo] != null && r[hi] != null) ? run.push(r) : flush());
+      flush();
+    }
 
     for (const s of series) {
       let d = "", pen = false;
@@ -283,7 +302,8 @@
         tile("Model MAE, last 7 days", `${fmtMW(s.mae_model_7d)} <small>MW</small>`, `all days: ${fmtMW(s.mae_model_all)} MW`) +
         tile("Baseline MAE, last 7 days", `${fmtMW(s.mae_baseline_7d)} <small>MW</small>`, `all days: ${fmtMW(s.mae_baseline_all)} MW`) +
         tile("Error reduction vs baseline", `${imp.toFixed(0)} <small>%</small>`, "last 7 days", imp > 0 ? "good" : "") +
-        tile("Days scored", `${s.days_scored}`, `${s.first_day} → ${s.last_day} · ${s.fallback_days} fallback`);
+        tile("Days scored", `${s.days_scored}`, `${s.first_day} → ${s.last_day} · ${s.fallback_days} fallback` +
+          (s.range_days ? `<br>80 % range held ${s.range_coverage_7d.toFixed(0)} % of hours (last 7 days)` : ""));
     } else {
       tiles.innerHTML = tile("Days scored", "0", "the first day is scored once its actual load is published") +
         tile("Forecasts published", `${s.days_published || 0}`, "live, before the fact");
@@ -302,7 +322,10 @@
     ], {
       aria: "Hourly SE3 load: actual, model forecast and baseline over the last 14 days and tomorrow",
       shadeFrom: unknown ? unknown.x : null, xTicks,
-      tipExtra: r => r.method && r.method !== "model" ? `<div class="t" style="margin:4px 0 0">fallback: ${r.method}</div>` : "",
+      band: { lo: "p10_mw", hi: "p90_mw", color: "--series-1" },
+      tipExtra: r =>
+        (r.p10_mw != null ? `<div class="row"><i class="swatch"></i>80 % range<b>${fmtMW(r.p10_mw)}–${fmtMW(r.p90_mw)} MW</b></div>` : "") +
+        (r.method && r.method !== "model" ? `<div class="t" style="margin:4px 0 0">fallback: ${r.method}</div>` : ""),
       empty: "No forecasts published yet.",
     });
 
@@ -320,9 +343,10 @@
     });
 
     table(document.getElementById("t-daily"),
-      [{ t: "Date", l: 1 }, { t: "Version", l: 1 }, { t: "Before gate closure", l: 1 }, { t: "Hours" }, { t: "MAE model" }, { t: "MAE baseline" }, { t: "MAPE model" }, { t: "MAPE baseline" }, { t: "Bias model" }],
+      [{ t: "Date", l: 1 }, { t: "Version", l: 1 }, { t: "Before gate closure", l: 1 }, { t: "Hours" }, { t: "MAE model" }, { t: "MAE baseline" }, { t: "MAPE model" }, { t: "MAPE baseline" }, { t: "Bias model" }, { t: "In 80 % range" }],
       [...(data.daily || [])].reverse().map(r => [r.date, r.model_version || "v1", r.before_gate_closure == null ? "–" : (r.before_gate_closure ? "yes" : "no"), r.hours, fmtMW(r.mae_model), fmtMW(r.mae_baseline),
-        r.mape_model.toFixed(2) + " %", r.mape_baseline.toFixed(2) + " %", (r.bias_model > 0 ? "+" : "") + fmtMW(r.bias_model)]));
+        r.mape_model.toFixed(2) + " %", r.mape_baseline.toFixed(2) + " %", (r.bias_model > 0 ? "+" : "") + fmtMW(r.bias_model),
+        r.range_coverage == null ? "–" : r.range_coverage.toFixed(0) + " %"]));
 
     const runs = data.runs || [];
     if (runs.length) table(document.getElementById("t-runs"),

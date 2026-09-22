@@ -32,7 +32,8 @@ def write_site_data(fc: pd.DataFrame, daily: pd.DataFrame) -> None:
     now = pd.Timestamp.now(tz="UTC")
     dates = sorted(fc.target_date.unique())[-(CHART_DAYS + 1):]   # last 14 days + tomorrow
     hourly = fc[fc.target_date.isin(dates)].reset_index()[
-        ["time_utc", "target_date", "actual_mw", "forecast_mw", "baseline_mw", "method", "model_version"]]
+        ["time_utc", "target_date", "actual_mw", "forecast_mw", "p10_mw", "p90_mw", "baseline_mw",
+         "method", "model_version"]]
 
     summary = {"days_scored": int(len(daily)), "days_published": int(fc.target_date.nunique())}
     if len(daily):
@@ -46,6 +47,16 @@ def write_site_data(fc: pd.DataFrame, daily: pd.DataFrame) -> None:
             "fallback_days": int((daily.method != "model").sum()),
             "current_version": str(fc.sort_values("target_date")["model_version"].iloc[-1]),
         })
+        # 80 % range: only days that published one (the range started after v2 went live)
+        ranged = daily.dropna(subset=["range_coverage"])
+        if len(ranged):
+            summary.update({
+                "range_days": int(len(ranged)),
+                "range_first_day": ranged.date.iloc[0],
+                "range_coverage_7d": round(float(ranged.tail(7).range_coverage.mean()), 1),
+                "range_coverage_all": round(float(ranged.range_coverage.mean()), 1),
+                "range_width_all": round(float(ranged.range_width.mean()), 0),
+            })
         # Error per model version, so a version change is visible in the numbers
         summary["by_version"] = {
             v: {"days": int(len(g)), "mae_model": round(float(g.mae_model.mean()), 1),
@@ -83,6 +94,9 @@ def main() -> None:
     fc["model_version"] = fc["model_version"].fillna(fc["method"].map({"model": "v1", "baseline": "baseline"}))
     if "before_gate_closure" not in fc:
         fc["before_gate_closure"] = pd.NA
+    for c in ("p10_mw", "p90_mw"):          # the 80 % range started later than the forecasts
+        if c not in fc:
+            fc[c] = float("nan")
 
     actual = load_hourly()
     fc["actual_mw"] = actual.reindex(fc.index)
@@ -111,9 +125,13 @@ def main() -> None:
             "mape_model": (x.err_model.abs() / x.actual_mw).mean() * 100,
             "mape_baseline": (x.err_baseline.abs() / x.actual_mw).mean() * 100,
             "bias_model": x.err_model.mean(),
+            # share of hours inside the published 80 % range (NaN if the day had no range)
+            "range_coverage": (((x.actual_mw >= x.p10_mw) & (x.actual_mw <= x.p90_mw)).mean() * 100
+                               if x.p10_mw.notna().all() else float("nan")),
+            "range_width": (x.p90_mw - x.p10_mw).mean() if x.p10_mw.notna().all() else float("nan"),
         })
     cols = ["date", "method", "model_version", "before_gate_closure", "hours", "mae_model", "mae_baseline",
-            "mape_model", "mape_baseline", "bias_model"]
+            "mape_model", "mape_baseline", "bias_model", "range_coverage", "range_width"]
     daily = pd.DataFrame(rows, columns=cols).round(2)
     daily.to_csv(SCORE_DIR / "daily.csv", index=False)
 
@@ -128,6 +146,10 @@ def main() -> None:
     print(f"  all days   MAE model {h.err_model.abs().mean():6.1f} MW | baseline {h.err_baseline.abs().mean():6.1f} MW")
     print(f"  last 7     MAE model {last7.err_model.abs().mean():6.1f} MW | baseline {last7.err_baseline.abs().mean():6.1f} MW")
     print(f"  fallbacks  {(daily.method != 'model').sum()} of {len(daily)} day(s)")
+    rd = daily.dropna(subset=["range_coverage"])
+    if len(rd):
+        print(f"  80% range  {len(rd)} day(s)  coverage {rd.range_coverage.mean():.1f} % (target 80)  "
+              f"mean width {rd.range_width.mean():.0f} MW")
     for v, g in daily.groupby("model_version"):
         print(f"  {v:9s}  {len(g)} day(s)  MAE model {g.mae_model.mean():6.1f} | baseline {g.mae_baseline.mean():6.1f}")
 

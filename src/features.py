@@ -5,6 +5,8 @@ Data decisions (keep this list in sync with the README):
 - ENTSO-E SE3 load is hourly until 2025-12-01 22:00 UTC and 15-minute from
   2025-12-01 23:00 UTC onward. Everything is resampled to hourly MEAN MW (= MWh
   per hour). An hour is kept only if fully covered; otherwise it becomes NaN.
+- The newest SETTLE_HOURS (3) hours of load are ignored: ENTSO-E publishes them
+  preliminary and they can be far too low until corrected.
 - ENTSO-E load timestamps mark the START of the hour. SMHI temperature is an
   instantaneous reading AT the timestamp. Temperature at 12:00 is therefore paired
   with the load averaged over 12:00-13:00.
@@ -41,7 +43,10 @@ def load_raw(pattern: str = "load_se3_*.csv") -> pd.Series:
 
 
 def to_hourly(s: pd.Series) -> pd.Series:
-    step = s.index.to_series().diff().shift(-1).fillna(pd.Timedelta("1h"))
+    # Minutes each reading covers = gap to the next reading. The LAST reading has no next one,
+    # so it gets the previous gap (15 min in the 15-minute era), not a full hour; otherwise a
+    # final hour with only 3 of its 4 quarter-hours would wrongly count as complete.
+    step = s.index.to_series().diff().shift(-1).ffill().fillna(pd.Timedelta("1h"))
     covered = (step.dt.total_seconds() / 60).clip(upper=60).resample("1h").sum()
     hourly = s.resample("1h").mean()
     hourly[covered < 60] = float("nan")
@@ -49,8 +54,17 @@ def to_hourly(s: pd.Series) -> pd.Series:
     return hourly
 
 
-def load_hourly() -> pd.Series:
-    return to_hourly(load_raw())
+SETTLE_HOURS = 3   # ENTSO-E's newest values are preliminary (seen: last 45 min ~28 % too low)
+
+
+def load_hourly(settle_hours: int = SETTLE_HOURS) -> pd.Series:
+    """Hourly load, minus the newest `settle_hours` hours, which are often still incomplete.
+    Nothing needs them: the model's shortest lag is 48 h, and only finished days are scored.
+    They come back once settled, because fetch.py --update re-fetches the last 3 days."""
+    h = to_hourly(load_raw())
+    h = h[h.notna().cumsum() > 0]                       # drop leading gaps, if any
+    last = h.last_valid_index()
+    return h[h.index <= last - pd.Timedelta(hours=settle_hours)] if last is not None else h
 
 
 # ---------------------------------------------------------------- temperature

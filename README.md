@@ -12,9 +12,9 @@ Every morning a GitHub Actions job pulls the latest load and weather data, publi
 
 Running since 18 September 2026. Rolling error is in [`scores/daily.csv`](scores/daily.csv) and on the live page.
 
-| Period | Model version | Days | Model MAE | Baseline MAE | Fallback days |
-|---|---|---|---|---|---|
-| _to be filled in after the first 7 scored days of v2_ | | | | | |
+| Period | Model version | Days | Model MAE | Baseline MAE | In 80 % range | Fallback days |
+|---|---|---|---|---|---|---|
+| _to be filled in after the first 7 scored days of v2_ | | | | | | |
 
 The first days (19–22 Sep) ran v1; v2 runs from 23 Sep. Scores are kept per version, so the two are never mixed.
 
@@ -35,6 +35,19 @@ What the backtest shows:
 - v1 under-forecast by 76–90 MW on average. Using one Stockholm station missed part of the heating demand elsewhere in SE3; the 9-city temperature in v2 cuts this to 48–67 MW and improves winter (Dec–Feb) MAE by 12–18 %. With regional temperature, the 24-hour mean temperature becomes one of the model's two strongest inputs (28–43 % of total gain, up from 8–15 % with Stockholm alone). The rest of the bias looks like year-to-year level variation: at the same temperature, weekday and hour, SE3 load differs by about ±200 MW between years, with no steady trend.
 - Three other ideas were tested and rejected (predicting the change from last week, a recent-level feature, weighting recent data more). All were worse than v1 on both test years. See [Model versions](#model-versions).
 - **The backtest is optimistic.** It uses *observed* temperature as if it were a perfect forecast. Live runs use SMHI's real forecast, so live error will be higher. Every SMHI forecast the job uses is archived in [`data/smhi_forecast/`](data/smhi_forecast/), so this gap can be measured once enough days have accumulated.
+
+### Forecast range (P10–P90)
+
+Every model forecast also publishes an **80 % range**: `p10_mw` and `p90_mw`. If the range is honest, the actual load should land inside it in about 8 of 10 hours, below it in 1 and above it in 1. It was added on 22 Sep 2026 without changing the point forecast, so it is still v2.
+
+| Test year | In range (target 80 %) | Below P10 / above P90 (targets 10 / 10) | Mean width | Pinball loss |
+|---|---|---|---|---|
+| Sep 2025 – Aug 2026 | **81.5 %** | 7.2 % / 11.3 % | 916 MW | 64.4 MW |
+| Sep 2024 – Aug 2025 | **83.0 %** | 7.8 % / 9.2 % | 1,040 MW | 65.1 MW |
+
+How it is built: the training history is cut into 4 time blocks; for each block the model is trained on the other three and its errors on the held-out block are recorded. The 10th and 90th percentiles of those out-of-sample errors, sized separately by season, time of day and days off, are added to the point forecast. The first attempt, separate LightGBM quantile models, held only about 52 % of hours in the backtest: errors a model makes on its own training data are smaller than its real future errors, so the band came out far too narrow. It was never published.
+
+Caveats: the range is slightly too wide in winter (84–93 % held) and too narrow in early summer (67–69 % in June), and it is calibrated with *observed* temperature. Live forecasts use forecast weather, so expect live coverage somewhat under 80 % until it is recalibrated on live errors.
 
 ## How it works
 
@@ -68,6 +81,7 @@ Every forecast file records the `model_version` that produced it. A version chan
 |---|---|---|---|
 | v1 | 18 Sep 2026 | LightGBM, Stockholm temperature (one station) | 306 / 321 MW |
 | v2 | 23 Sep 2026 | Same model, temperature = population-weighted mean over 9 SE3 cities | 269 / 290 MW |
+| v2 + range | 22 Sep 2026 (code) | 80 % range added next to the unchanged point forecast | coverage 81.5 / 83.0 % |
 
 How v2 was chosen: [`src/experiment.py`](src/experiment.py) backtests six variants on the same hours. Only the regional temperature won on both years; everything else was worse than v1. (The table below is the original experiment run, before the Västerås station was replaced with an hourly one; the final v2 numbers above come from `src/model.py` after the fix.)
 
@@ -85,6 +99,7 @@ How v2 was chosen: [`src/experiment.py`](src/experiment.py) backtests six varian
 - **All timestamps are UTC.** Swedish local time is only used to derive calendar features.
 - **Resolution change:** ENTSO-E SE3 load is hourly until 2025-12-01 22:00 UTC and 15-minute from 23:00 UTC. Everything is averaged to hourly MW. An hour is kept only if it is fully covered.
 - **Alignment:** ENTSO-E timestamps mark the start of the hour; SMHI temperature is an instantaneous reading at the timestamp. Checked with `python src/features.py --check`: load bottoms out at 04h and peaks at 17h local time, temperature bottoms out at 05h and peaks at 14h, and load correlates at −0.86 with the 24-hour mean temperature.
+- **The newest 3 hours of load are ignored.** ENTSO-E publishes the latest values as preliminary: on 22 Sep 2026 the last 45 minutes read about 6,300 MW against 8,800 MW just before, about 28 % too low, and are corrected later. Nothing needs those hours (the shortest lag is 48 h and only finished days are scored), and the daily job re-fetches the last 3 days, so they return once settled. An hour also only counts if all four of its quarter-hours are present.
 - **Temperature gaps** of up to 3 hours are interpolated; longer gaps stay missing.
 - **Holidays** are computed in code rather than with the `holidays` package, which counts every Sunday as a Swedish holiday by default.
 - **Regional temperature (v2):** one SMHI station per city (Stockholm, Göteborg, Uppsala, Linköping, Örebro, Västerås, Jönköping, Karlstad, Gävle), weighted by rough share of SE3 population. A station is only accepted if it reports at least 90 % of hours; the nearest Västerås station turned out to report only twice a day, so Västerås uses the nearest hourly station instead (Eskilstuna A, 26 km away, also in the Mälaren region). Each hour uses the stations that have data, with the weights renormalised; below 80 % of the total weight the hour counts as missing. The station list is fixed in `data/regional_stations.csv`, so the inputs never change silently.
