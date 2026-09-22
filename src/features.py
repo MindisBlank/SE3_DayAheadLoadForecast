@@ -9,11 +9,15 @@ Data decisions (keep this list in sync with the README):
   instantaneous reading AT the timestamp. Temperature at 12:00 is therefore paired
   with the load averaged over 12:00-13:00.
 - Temperature gaps of up to 3 hours are linearly interpolated; longer gaps stay NaN.
+- v2 temperature = population-weighted mean over the regional stations in
+  data/regional_stations.csv. Each hour uses the stations that have a value, with the
+  weights renormalised; an hour whose available weight is below MIN_COVERAGE is NaN.
 - Holidays are computed in holidays_se() below (no external package).
 
 Usage:
     python src/features.py            # build and summarise the table
-    python src/features.py --check    # alignment sanity checks
+    python src/features.py --check    # alignment sanity checks (regional temperature)
+    python src/features.py --check --temp stockholm
 """
 import argparse
 from datetime import date, timedelta
@@ -23,6 +27,7 @@ import pandas as pd
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 LOCAL_TZ = "Europe/Stockholm"
+MIN_COVERAGE = 0.8   # share of the regional weight that must be present for an hour to count
 
 
 # ---------------------------------------------------------------- load
@@ -58,6 +63,48 @@ def temp_hourly(station: str = "98230") -> pd.Series:
     s = s.interpolate(limit=3, limit_area="inside")
     s.name = "temp_c"
     return s
+
+
+def regional_meta() -> pd.DataFrame:
+    f = DATA_DIR / "regional_stations.csv"
+    if not f.exists():
+        raise SystemExit(f"{f} missing - run: python src/fetch_weather.py --relookup")
+    return pd.read_csv(f, dtype={"id": str})
+
+
+def regional_obs_hourly() -> pd.DataFrame:
+    """Observed temperature per regional city on a strict hourly grid (one column per city)."""
+    cols = {}
+    for _, r in regional_meta().iterrows():
+        f = DATA_DIR / f"temp_obs_{r['id']}.csv"
+        if not f.exists():
+            print(f"warning: {f.name} missing - {r['city']} left out")
+            continue
+        df = pd.read_csv(f, parse_dates=["time_utc"], index_col="time_utc")
+        cols[r["city"]] = df["temp_c"].resample("1h").mean().interpolate(limit=3, limit_area="inside")
+    return pd.DataFrame(cols)
+
+
+def weighted_temperature(temps: pd.DataFrame, min_coverage: float = MIN_COVERAGE) -> tuple[pd.Series, pd.Series]:
+    """Population-weighted temperature over the city columns in `temps`.
+
+    Returns (temperature, coverage). Coverage is the share of the TOTAL regional weight
+    that had a value that hour; hours below `min_coverage` get NaN temperature."""
+    w_all = regional_meta().set_index("city")["weight"]
+    w = w_all.reindex(temps.columns).fillna(0.0)
+    have = temps.notna().astype(float) * w
+    coverage = have.sum(axis=1) / w_all.sum()
+    temp = (temps.fillna(0.0) * w).sum(axis=1) / have.sum(axis=1).replace(0.0, float("nan"))
+    temp[coverage < min_coverage] = float("nan")
+    temp.name = "temp_c"
+    return temp, coverage
+
+
+def temperature(source: str = "regional") -> pd.Series:
+    """The temperature series a model version trains on: 'regional' (v2) or 'stockholm' (v1)."""
+    if source == "stockholm":
+        return temp_hourly()
+    return weighted_temperature(regional_obs_hourly())[0]
 
 
 # ---------------------------------------------------------------- calendar
@@ -152,9 +199,9 @@ def make_features(load: pd.Series, temp: pd.Series, index: pd.DatetimeIndex) -> 
     return df.join(calendar_features(index))
 
 
-def build_dataset() -> pd.DataFrame:
+def build_dataset(temp_source: str = "regional") -> pd.DataFrame:
     y = load_hourly()
-    return make_features(y, temp_hourly(), y.index)
+    return make_features(y, temperature(temp_source), y.index)
 
 
 def check(df: pd.DataFrame) -> None:
@@ -178,8 +225,9 @@ def check(df: pd.DataFrame) -> None:
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--check", action="store_true")
+    p.add_argument("--temp", choices=["regional", "stockholm"], default="regional")
     a = p.parse_args()
-    df = build_dataset()
+    df = build_dataset(a.temp)
     print(f"{df.index.min()} -> {df.index.max()}  |  {len(df)} rows  |  {df.shape[1]} columns")
     if a.check:
         check(df)

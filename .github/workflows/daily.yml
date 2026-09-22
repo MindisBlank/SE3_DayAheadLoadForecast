@@ -2,9 +2,12 @@ name: daily-forecast
 
 on:
   schedule:
-    # 08:15 UTC = 10:15 Swedish summer time / 09:15 winter time, well before the
-    # 12:00 CET day-ahead gate closure. GitHub may start scheduled jobs a bit late.
-    - cron: "15 8 * * *"
+    # Gate closure is 12:00 Swedish time = 10:00 UTC (summer) / 11:00 UTC (winter).
+    # GitHub often starts scheduled jobs hours late, so there are three triggers.
+    # The first run publishes; later ones log "exists" and only refresh the scores.
+    - cron: "37 4 * * *"
+    - cron: "7 6 * * *"
+    - cron: "37 7 * * *"
   workflow_dispatch: {}   # "Run workflow" button for manual runs
 
 permissions:

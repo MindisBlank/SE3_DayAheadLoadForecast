@@ -142,7 +142,8 @@
   </section>
 
   <footer>
-    <p><b>Backtest</b> (held-out year Sep 2025–Aug 2026, observed temperature used as a perfect forecast, so optimistic): model MAE 306 MW (3.2 %) vs baseline 639 MW (6.6 %). The live numbers above use real SMHI forecasts and are the honest ones.</p>
+    <p><b>Model versions.</b> v1: Stockholm temperature only. v2 (from 23 Sep 2026): population-weighted temperature over nine SE3 cities. Each day's version is shown in the score table.</p>
+    <p><b>Backtest</b> (held-out year Sep 2025–Aug 2026, observed temperature used as a perfect forecast, so optimistic): v2 MAE 269 MW (2.9 %), v1 306 MW (3.2 %), baseline 639 MW (6.6 %). The live numbers above use real SMHI forecasts and are the honest ones.</p>
     <p>Data: ENTSO-E Transparency Platform (load), SMHI Open Data (temperature). Source and full forecast history in the repository.</p>
   </footer>
 </main>
@@ -314,19 +315,19 @@
       height: 240, zero: true, markers: daily.length <= 45,
       aria: "Daily mean absolute error of the model and the baseline",
       xTicks: daily.map(r => r.x),
-      tipTitle: r => `${r.date}${r.method !== "model" ? " · fallback" : ""}`,
+      tipTitle: r => `${r.date} · ${r.model_version || "v1"}${r.method !== "model" ? " (fallback)" : ""}`,
       empty: "The first day is scored once its actual load is published by ENTSO-E (the morning after).",
     });
 
     table(document.getElementById("t-daily"),
-      [{ t: "Date", l: 1 }, { t: "Method", l: 1 }, { t: "Hours" }, { t: "MAE model" }, { t: "MAE baseline" }, { t: "MAPE model" }, { t: "MAPE baseline" }, { t: "Bias model" }],
-      [...(data.daily || [])].reverse().map(r => [r.date, r.method, r.hours, fmtMW(r.mae_model), fmtMW(r.mae_baseline),
+      [{ t: "Date", l: 1 }, { t: "Version", l: 1 }, { t: "Before gate closure", l: 1 }, { t: "Hours" }, { t: "MAE model" }, { t: "MAE baseline" }, { t: "MAPE model" }, { t: "MAPE baseline" }, { t: "Bias model" }],
+      [...(data.daily || [])].reverse().map(r => [r.date, r.model_version || "v1", r.before_gate_closure == null ? "–" : (r.before_gate_closure ? "yes" : "no"), r.hours, fmtMW(r.mae_model), fmtMW(r.mae_baseline),
         r.mape_model.toFixed(2) + " %", r.mape_baseline.toFixed(2) + " %", (r.bias_model > 0 ? "+" : "") + fmtMW(r.bias_model)]));
 
     const runs = data.runs || [];
     if (runs.length) table(document.getElementById("t-runs"),
-      [{ t: "Run (UTC)", l: 1 }, { t: "For", l: 1 }, { t: "Method", l: 1 }, { t: "Note", l: 1 }],
-      runs.map(r => [r.run_utc, r.target_date, r.method, r.note || ""]));
+      [{ t: "Run (UTC)", l: 1 }, { t: "For", l: 1 }, { t: "Method", l: 1 }, { t: "Version", l: 1 }, { t: "Note", l: 1 }],
+      runs.map(r => [r.run_utc, r.target_date, r.method, r.model_version || (r.method === "model" ? "v1" : ""), r.note || ""]));
     else document.getElementById("t-runs").outerHTML = `<div class="empty">No runs logged yet.</div>`;
   }
 

@@ -1,7 +1,8 @@
 """LightGBM day-ahead load model, backtested side by side with the seasonal-naive baseline.
 
 Usage:
-    python src/model.py                        # backtest on the held-out year
+    python src/model.py                        # backtest v2 (regional temperature) on the held-out year
+    python src/model.py --temp stockholm       # backtest v1 (Stockholm temperature only)
     python src/model.py --test-start 2024-09-01 --test-end 2025-09-01   # a second year
     python src/model.py --final                # train on ALL data, save models/lgbm_load.txt
 
@@ -24,6 +25,9 @@ from features import build_dataset
 
 ROOT = Path(__file__).resolve().parent.parent
 TARGET = "load_mw"
+# Model versions: same features and settings, different temperature input.
+# Every published forecast records which one produced it.
+VERSIONS = {"stockholm": "v1", "regional": "v2"}
 FEATURES = [
     "temp_c", "temp_24h_mean", "hdh",
     "load_lag_48", "load_lag_168",
@@ -54,7 +58,7 @@ def fmt(res: dict) -> str:
     return f"MAE {res['MAE_MW']:7.1f} MW   MAPE {res['MAPE_%']:5.2f} %   bias {res['bias_MW']:+6.1f} MW"
 
 
-def backtest(df: pd.DataFrame, start: str, end: str) -> None:
+def backtest(df: pd.DataFrame, start: str, end: str, suffix: str = "") -> None:
     t0, t1 = pd.Timestamp(start, tz="UTC"), pd.Timestamp(end, tz="UTC")
     train_df = df[df.index < t0]
     test_df = df[(df.index >= t0) & (df.index < t1)].dropna(subset=FEATURES + [TARGET])
@@ -91,7 +95,7 @@ def backtest(df: pd.DataFrame, start: str, end: str) -> None:
 
     out_dir = ROOT / "backtest"
     out_dir.mkdir(exist_ok=True)
-    out = out_dir / f"backtest_{t0:%Y%m%d}_{t1:%Y%m%d}.csv"
+    out = out_dir / f"backtest_{t0:%Y%m%d}_{t1:%Y%m%d}{suffix}.csv"
     pd.DataFrame({"actual_mw": y, "model_mw": pred.round(1), "baseline_mw": base}).to_csv(out)
     print(f"\nSaved {out}")
 
@@ -101,9 +105,12 @@ def main() -> None:
     p.add_argument("--test-start", default="2025-09-01")
     p.add_argument("--test-end", default="2026-09-01")
     p.add_argument("--final", action="store_true", help="train on all data and save the model")
+    p.add_argument("--temp", choices=list(VERSIONS), default="regional",
+                   help="temperature input: regional (v2, live) or stockholm (v1)")
     a = p.parse_args()
 
-    df = build_dataset()
+    print(f"Model {VERSIONS[a.temp]} ({a.temp} temperature)")
+    df = build_dataset(a.temp)
     if a.final:
         model = train(df)
         out = ROOT / "models" / "lgbm_load.txt"
@@ -111,7 +118,8 @@ def main() -> None:
         model.save_model(str(out))
         print(f"Trained on {df.index.min():%Y-%m-%d} -> {df.index.max():%Y-%m-%d}; saved {out}")
     else:
-        backtest(df, a.test_start, a.test_end)
+        # v2 keeps the plain file name (compare_tso.py reads it); v1 gets a suffix
+        backtest(df, a.test_start, a.test_end, suffix="" if a.temp == "regional" else "_v1")
 
 
 if __name__ == "__main__":
