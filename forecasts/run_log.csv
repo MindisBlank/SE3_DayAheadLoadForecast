@@ -64,3 +64,7 @@ run_utc,target_date,method,note,model_version,before_gate_closure
 2026-10-11T12:38Z,2026-10-12,exists,2026-10-12.csv already published,,
 2026-10-11T14:19Z,2026-10-12,exists,2026-10-12.csv already published,,
 2026-10-12T12:22Z,2026-10-13,model,trained on 32958 h; weather: smhi regional 9 cities (fresh),v2,False
+2026-10-12T15:11Z,2026-10-13,exists,2026-10-13.csv already published,,
+2026-10-12T16:56Z,2026-10-13,exists,2026-10-13.csv already published,,
+2026-10-13T12:06Z,2026-10-14,model,trained on 32982 h; weather: smhi regional 9 cities (fresh),v2,False
+2026-10-13T14:03Z,2026-10-14,exists,2026-10-14.csv already published,,
