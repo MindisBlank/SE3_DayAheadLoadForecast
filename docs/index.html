@@ -63,6 +63,7 @@
   .tile .value { font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.2; margin-top: 2px; }
   .tile .value small { font-size: 14px; font-weight: 500; color: var(--text-secondary); }
   .tile .sub { color: var(--text-muted); font-size: 12px; margin-top: 2px; }
+  .tile .sub .good { color: var(--good); font-weight: 600; }
   .tile .value.good { color: var(--good); }
 
   .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 18px 18px 12px; margin-bottom: 16px; }
@@ -145,8 +146,8 @@
   </section>
 
   <footer>
-    <p><b>Model versions.</b> v1: Stockholm temperature only. v2 (from 23 Sep 2026): population-weighted temperature over nine SE3 cities. Each day's version is shown in the score table. The shaded band is the model's 80 % range (P10–P90): if it is well calibrated, about 8 in 10 hours land inside it.</p>
-    <p><b>Backtest</b> (held-out year Sep 2025–Aug 2026, observed temperature used as a perfect forecast, so optimistic): v2 MAE 269 MW (2.9 %), v1 306 MW (3.2 %), baseline 639 MW (6.6 %). The live numbers above use real SMHI forecasts and are the honest ones.</p>
+    <p><b>Model versions.</b> v1: Stockholm temperature only. v2 (from 23 Sep 2026): population-weighted temperature over nine SE3 cities. v3 (from 14 Oct 2026): adds wind, cloud cover, humidity and rain, and shifts the forecast by the model's own recent bias. Each day's version is shown in the score table. The shaded band is the model's 80 % range (P10–P90): if it is well calibrated, about 8 in 10 hours land inside it.</p>
+    <p><b>Backtest</b> (held-out year Sep 2025–Aug 2026, observed temperature used as a perfect forecast, so optimistic): v3 MAE 264 MW (2.8 %), v2 269 MW (2.9 %), v1 306 MW (3.2 %), baseline 639 MW (6.6 %). The live numbers above use real SMHI forecasts and are the honest ones.</p>
     <p>Data: ENTSO-E Transparency Platform (load), SMHI Open Data (temperature). Source and full forecast history in the repository.</p>
   </footer>
 </main>
@@ -298,10 +299,23 @@
     const tiles = document.getElementById("tiles");
     if (s.days_scored) {
       const imp = (1 - s.mae_model_7d / s.mae_baseline_7d) * 100;
+      // MAPE comes straight off the daily rows, which carry every scored day
+      const rows = data.daily || [];
+      const avg = a => { const v = a.map(r => r.mape_model).filter(Number.isFinite);
+                         return v.length ? v.reduce((x, y) => x + y, 0) / v.length : null; };
+      const pct = v => v == null ? "–" : v.toFixed(2) + " %";
+      const mape7 = avg(rows.slice(-7)), mapeAll = avg(rows);
+      // the current version on its own, so a version change shows up here rather than being
+      // averaged away with its predecessor
+      const ver = s.current_version, mapeVer = avg(rows.filter(r => r.model_version === ver));
+
       tiles.innerHTML =
         tile("Model MAE, last 7 days", `${fmtMW(s.mae_model_7d)} <small>MW</small>`, `all days: ${fmtMW(s.mae_model_all)} MW`) +
-        tile("Baseline MAE, last 7 days", `${fmtMW(s.mae_baseline_7d)} <small>MW</small>`, `all days: ${fmtMW(s.mae_baseline_all)} MW`) +
-        tile("Error reduction vs baseline", `${imp.toFixed(0)} <small>%</small>`, "last 7 days", imp > 0 ? "good" : "") +
+        tile("Baseline MAE, last 7 days", `${fmtMW(s.mae_baseline_7d)} <small>MW</small>`,
+          `all days: ${fmtMW(s.mae_baseline_all)} MW` +
+          (imp > 0 ? ` · model <b class="good">${imp.toFixed(0)} %</b> better` : "")) +
+        tile("Model MAPE, last 7 days", `${mape7 == null ? "–" : mape7.toFixed(2)} <small>%</small>`,
+          `all days: ${pct(mapeAll)}` + (ver && mapeVer != null ? ` · ${ver}: ${pct(mapeVer)}` : "")) +
         tile("Days scored", `${s.days_scored}`, `${s.first_day} → ${s.last_day} · ${s.fallback_days} fallback` +
           (s.range_days ? `<br>80 % range held ${s.range_coverage_7d.toFixed(0)} % of hours (last 7 days)` : ""));
     } else {
