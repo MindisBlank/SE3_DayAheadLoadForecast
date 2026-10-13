@@ -114,6 +114,50 @@ def weighted_temperature(temps: pd.DataFrame, min_coverage: float = MIN_COVERAGE
     return temp, coverage
 
 
+EXTRA_VARS = ["wind", "cloud", "humidity", "precip"]
+
+
+def extra_weather_weights() -> dict:
+    """{variable: {city: weight}} - which cities have each extra variable, and their weights."""
+    meta_f = DATA_DIR / "wx_stations.csv"
+    if not meta_f.exists():
+        return {}
+    meta = pd.read_csv(meta_f, dtype={"id": str})
+    return {var: dict(zip(g.city, g.weight)) for var, g in meta.groupby("variable")}
+
+
+def weighted_from(frame: pd.DataFrame, weights: dict, min_coverage: float = MIN_COVERAGE) -> pd.Series:
+    """Weighted mean over the city columns present, renormalised; NaN below min_coverage."""
+    w = pd.Series(weights).reindex(frame.columns).fillna(0.0)
+    have = frame.notna().astype(float) * w
+    coverage = have.sum(axis=1) / sum(weights.values())
+    out = (frame.fillna(0.0) * w).sum(axis=1) / have.sum(axis=1).replace(0.0, float("nan"))
+    return out.where(coverage >= min_coverage)
+
+
+def extra_weather() -> pd.DataFrame:
+    """Observed weighted series for the extra weather variables (whatever was fetched).
+
+    Each variable may come from a different station per city (cloud cover, for instance, is
+    only observed at some), so the station per city and variable is read from
+    data/wx_stations.csv. Empty frame when `fetch_weather.py --extra` has never been run."""
+    meta_f = DATA_DIR / "wx_stations.csv"
+    if not meta_f.exists():
+        return pd.DataFrame()
+    meta = pd.read_csv(meta_f, dtype={"id": str})
+    out = {}
+    for var, g in meta.groupby("variable"):
+        cols = {}
+        for _, r in g.iterrows():
+            f = DATA_DIR / f"wx_{var}_{r['id']}.csv"
+            if f.exists():
+                d = pd.read_csv(f, parse_dates=["time_utc"], index_col="time_utc")
+                cols[r["city"]] = d[var].resample("1h").mean().interpolate(limit=3, limit_area="inside")
+        if cols:
+            out[var] = weighted_from(pd.DataFrame(cols), dict(zip(g.city, g.weight)))
+    return pd.DataFrame(out)
+
+
 def temperature(source: str = "regional") -> pd.Series:
     """The temperature series a model version trains on: 'regional' (v2) or 'stockholm' (v1)."""
     if source == "stockholm":
@@ -213,9 +257,31 @@ def make_features(load: pd.Series, temp: pd.Series, index: pd.DatetimeIndex) -> 
     return df.join(calendar_features(index))
 
 
-def build_dataset(temp_source: str = "regional") -> pd.DataFrame:
+def add_weather_features(df: pd.DataFrame, wx: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Extra weather columns, from `wx` if given (live: observed history + SMHI forecast),
+    otherwise from the observed history alone. Same formulas either way, so training and
+    forecasting can never drift apart. wx_* columns are absent when nothing was fetched."""
+    wx = extra_weather() if wx is None else wx
+    if wx is None or wx.empty:
+        return df
+    # Roll on the full series and reindex afterwards (as make_features does for temperature):
+    # rolling after reindexing would leave the first 18 h of a one-day live frame empty.
+    wx, idx = wx.sort_index(), df.index
+    for var in wx.columns:
+        df[f"wx_{var}"] = wx[var].reindex(idx)
+    if "wind" in wx:
+        # wind only matters when it is cold: a crude wind-chill style interaction
+        df["wx_wind_chill"] = df["wx_wind"] * (15 - df["temp_c"]).clip(lower=0)
+        df["wx_wind_24h"] = wx["wind"].rolling(24, min_periods=18).mean().reindex(idx)
+    if "cloud" in wx:
+        df["wx_cloud_24h"] = wx["cloud"].rolling(24, min_periods=18).mean().reindex(idx)
+    return df
+
+
+def build_dataset(temp_source: str = "regional", weather: bool = False) -> pd.DataFrame:
     y = load_hourly()
-    return make_features(y, temperature(temp_source), y.index)
+    df = make_features(y, temperature(temp_source), y.index)
+    return add_weather_features(df) if weather else df
 
 
 def check(df: pd.DataFrame) -> None:

@@ -227,8 +227,11 @@ __marimo__/
 # ------------------------------------------------------------------
 # SE3 project
 # Committed on purpose (the daily job needs them, or they ARE the portfolio):
-#   data/load_se3_all.csv   data/temp_obs_*.csv   data/smhi_forecast/
+#   data/load_se3_all.csv   data/temp_obs_*.csv   data/smhi_forecast*/
+#   data/wx_*.csv           data/regional_stations.csv   data/wx_stations.csv
 #   forecasts/   scores/
+# The wx_* files and wx_stations.csv are not optional: without them the daily job has no
+# weather history, every run falls back from v3 to v2, and it does so quietly.
 # ------------------------------------------------------------------
 
 # One-off load pulls from `fetch.py --start/--end`; merged into load_se3_all.csv

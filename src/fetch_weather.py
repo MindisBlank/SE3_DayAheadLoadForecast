@@ -10,6 +10,7 @@ Observations: metobs parameter 1 = air temperature, timestamps in UTC. Two perio
     corrected-archive  quality-controlled, up to ~3 months ago
     latest-months      the last ~4 months, not yet fully controlled
 Output: data/temp_obs_<station>.csv  (time_utc, temp_c, quality)
+        data/wx_<variable>_<station>.csv  for the extra weather variables (--extra)
 
 Regional stations: for each city in REGIONAL, the nearest active station that reports
 HOURLY (at least 90 % of hours over the last year) is chosen once and saved to
@@ -18,9 +19,10 @@ silently. Use --relookup to choose again.
 
 Forecasts: SMHI does not keep old forecasts, so every one we use is archived.
     data/smhi_forecast/<referenceTime>.json            Stockholm, raw response (v1)
-    data/smhi_forecast_regional/<fetched-UTC>.json     9 cities, temperature only (v2);
-                                                       named by FETCH time, so an archived
-                                                       forecast is never dated after it was used
+    data/smhi_forecast_regional/<fetched-UTC>.json     9 cities, temperature + wind, cloud,
+                                                       humidity and rain (v2/v3); named by
+                                                       FETCH time, so an archived forecast is
+                                                       never dated after it was used
 """
 import argparse
 import io
@@ -54,10 +56,17 @@ REGIONAL = {
 }
 MIN_HOURLY_SHARE = 0.90   # a regional station must report at least this share of hours
 MAX_CANDIDATES = 6        # stations tried per city, nearest first
+MAX_EXTRA_KM = 60         # an extra-weather station further away than this is not that city
 
-STATION_LIST_URL = "https://opendata-download-metobs.smhi.se/api/version/1.0/parameter/1.json"
+STATION_LIST_URL = "https://opendata-download-metobs.smhi.se/api/version/1.0/parameter/{param}.json"
 OBS_URL = ("https://opendata-download-metobs.smhi.se/api/version/1.0/"
-           "parameter/1/station/{station}/period/{period}/data.csv")
+           "parameter/{param}/station/{station}/period/{period}/data.csv")
+PARAM_LIST_URL = "https://opendata-download-metobs.smhi.se/api/version/1.0.json"
+
+# Extra weather for the "does more than temperature help?" experiment. SMHI parameter ids;
+# the fetch prints each parameter's official title so they can be checked on first run.
+EXTRA_PARAMS = {"4": "wind", "6": "humidity", "7": "precip", "16": "cloud"}
+EXTRA_CITIES = 4        # only the biggest cities, to keep the repo small (~74 % of the weight)
 FCST_URL = ("https://opendata-download-metfcst.smhi.se/api/category/snow1g/version/1/"
             "geotype/point/lon/{lon}/lat/{lat}/data.json")
 
@@ -69,6 +78,9 @@ def get(url: str, retries: int = 3) -> requests.Response:
             r.raise_for_status()
             return r
         except requests.RequestException as e:
+            status = getattr(e.response, "status_code", None)
+            if status == 404:        # "this station has no such data": permanent, don't retry
+                raise
             if attempt == retries:
                 raise
             print(f"  attempt {attempt} failed ({e}); retrying")
@@ -76,26 +88,50 @@ def get(url: str, retries: int = 3) -> requests.Response:
 
 
 # ------------------------------------------------------------------ observations
-def parse_obs_csv(text: str) -> pd.DataFrame:
-    """SMHI CSVs start with station metadata; the table begins at the 'Datum;Tid (UTC)' row."""
+VALUE_NAMES = {"1": "Lufttemperatur", "4": "Vindhastighet", "6": "Relativ Luftfuktighet",
+               "7": "Nederbördsmängd", "16": "Total molnmängd"}
+
+
+def parse_obs_csv(text: str, param: str = "1") -> pd.DataFrame:
+    """SMHI CSVs start with station metadata; the table begins at the 'Datum;Tid (UTC)' row.
+    Column layout varies by parameter (some files carry two measurements), so the value
+    column is found by NAME and its quality flag is the column right after it."""
     lines = text.splitlines()
     start = next(i for i, l in enumerate(lines) if l.startswith("Datum;Tid"))
-    station_line = lines[1] if len(lines) > 1 else ""
-    print(f"  station: {station_line.split(';')[0]}")
-    table = "\n".join(";".join(l.split(";")[:4]) for l in lines[start + 1:] if l.strip())
-    df = pd.read_csv(io.StringIO(table), sep=";", header=None,
-                     names=["date", "time", "temp_c", "quality"])
-    df["time_utc"] = pd.to_datetime(df["date"] + " " + df["time"], utc=True)
-    return df.set_index("time_utc")[["temp_c", "quality"]]
+    header = [h.strip() for h in lines[start].split(";")]
+    print(f"  station: {lines[1].split(';')[0]}")
+
+    want = VALUE_NAMES.get(param, "")
+    col = next((i for i, h in enumerate(header) if h.lower().startswith(want.lower()) and want), 2)
+    keep = [0, 1, col, col + 1 if col + 1 < len(header) else col]
+    rows = []
+    for l in lines[start + 1:]:
+        if not l.strip():
+            continue
+        f = l.split(";")
+        if len(f) <= max(keep) or not f[0][:4].isdigit():
+            continue
+        rows.append([f[i] for i in keep])
+    df = pd.DataFrame(rows, columns=["date", "time", "value", "quality"])
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    df["time_utc"] = pd.to_datetime(df["date"] + " " + df["time"], utc=True, errors="coerce")
+    df = df.dropna(subset=["time_utc", "value"])
+    return df.set_index("time_utc")[["value", "quality"]]
 
 
-def fetch_obs(station: str, since: str) -> pd.DataFrame:
+def fetch_obs(station: str, since: str, param: str = "1") -> pd.DataFrame:
     parts = []
     for period in ["corrected-archive", "latest-months"]:
-        print(f"Fetching station {station}, {period}")
-        r = get(OBS_URL.format(station=station, period=period))
+        print(f"Fetching station {station}, parameter {param}, {period}")
+        try:
+            r = get(OBS_URL.format(param=param, station=station, period=period))
+        except Exception as e:      # a parameter may exist in only one of the two periods
+            print(f"  {period} not available ({str(e)[:60]})")
+            continue
         r.encoding = "utf-8"
-        parts.append(parse_obs_csv(r.text))
+        parts.append(parse_obs_csv(r.text, param))
+    if not parts:
+        raise RuntimeError(f"station {station} has no data for parameter {param}")
     df = pd.concat(parts)
     df = df[~df.index.duplicated(keep="last")].sort_index()   # overlap: keep the newer pull
     df = df[df.index >= pd.Timestamp(since, tz="UTC")]
@@ -104,7 +140,7 @@ def fetch_obs(station: str, since: str) -> pd.DataFrame:
     print(f"  {len(df)} rows, {df.index.min()} -> {df.index.max()}")
     print(f"  time steps: {dict(steps)}")
     print(f"  quality flags: {df['quality'].value_counts().to_dict()}")
-    print(f"  temp min/mean/max: {df.temp_c.min():.1f} / {df.temp_c.mean():.1f} / {df.temp_c.max():.1f} C")
+    print(f"  min/mean/max: {df.value.min():.1f} / {df.value.mean():.1f} / {df.value.max():.1f}")
     return df
 
 
@@ -117,13 +153,18 @@ def hourly_share(df: pd.DataFrame, days: int = 365) -> float:
     return recent.index.floor("h").nunique() / (days * 24)
 
 
-def candidate_stations(lat: float, lon: float, since: str) -> list[dict]:
-    """Active stations whose record reaches back to `since`, nearest first."""
-    stations = get(STATION_LIST_URL).json()["station"]
+def candidate_stations(lat: float, lon: float, since: str, param: str = "1") -> list[dict]:
+    """Active stations REPORTING THIS PARAMETER whose record reaches back to `since`,
+    nearest first. Each parameter has its own station list: most automatic stations
+    measure temperature and wind, while cloud cover is observed at far fewer."""
+    stations = get(STATION_LIST_URL.format(param=param)).json()["station"]
     t_since = pd.Timestamp(since, tz="UTC").value // 10**6   # SMHI uses epoch ms
+    recent = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=30)).value // 10**6
     out = []
     for st in stations:
         if not st.get("active") or st.get("from", 0) > t_since:
+            continue
+        if st.get("to", 0) and st["to"] < recent:    # stopped reporting this parameter
             continue
         dy = (st["latitude"] - lat) * 111
         dx = (st["longitude"] - lon) * 111 * math.cos(math.radians(lat))
@@ -148,7 +189,7 @@ def lookup_regional(since: str) -> pd.DataFrame:
             if share < MIN_HOURLY_SHARE:
                 print(f"  rejected: only {share:.0%} of hours reported over the last year\n")
                 continue
-            df.to_csv(DATA_DIR / f"temp_obs_{st['id']}.csv")
+            df.rename(columns={"value": "temp_c"}).to_csv(DATA_DIR / f"temp_obs_{st['id']}.csv")
             chosen = {"city": city, "weight": w, **st}
             print(f"  accepted ({share:.0%} hourly)\n")
             break
@@ -170,13 +211,101 @@ def refresh_regional(since: str) -> None:
             continue
         print(f"{r['city']}:")
         try:
-            fetch_obs(r["id"], since).to_csv(DATA_DIR / f"temp_obs_{r['id']}.csv")
+            fetch_obs(r["id"], since).rename(columns={"value": "temp_c"}).to_csv(DATA_DIR / f"temp_obs_{r['id']}.csv")
         except Exception as e:      # keep the old file; the forecast step checks coverage
             print(f"  FAILED ({e}); keeping the cached file")
         print()
 
 
+# Plausible ranges; values outside are dropped (cloud cover carries code values > 100)
+EXTRA_LIMITS = {"wind": (0, 60), "humidity": (0, 100), "precip": (0, 100), "cloud": (0, 100)}
+
+# SNOW1g field -> our name. Cloud is reported in octas (0-8) and converted to percent,
+# so the forecast matches the observed scale the model was trained on.
+FORECAST_VARS = {"air_temperature": "temp", "wind_speed": "wind", "relative_humidity": "humidity",
+                 "precipitation_amount_mean_deterministic": "precip", "cloud_area_fraction": "cloud"}
+
+
+def fetch_extra(since: str) -> None:
+    """Observed wind / humidity / precipitation / cloud cover near the biggest cities.
+
+    Not every station reports every variable: cloud cover in particular is a manual
+    observation that automatic stations do not make. So for each city and variable the
+    nearest station that actually has it is used, and which one is recorded in
+    data/wx_stations.csv. One file per city and variable: data/wx_<name>_<station>.csv."""
+    titles = {p["key"]: f"{p['title']} ({p.get('summary', '')})"
+              for p in get(PARAM_LIST_URL).json()["resource"]}
+    meta = pd.read_csv(REGIONAL_META, dtype={"id": str}).nlargest(EXTRA_CITIES, "weight")
+    print("Cities: " + ", ".join(f"{c} ({w:.0%})" for c, w in zip(meta.city, meta.weight)))
+    found = []
+    for param, name in EXTRA_PARAMS.items():
+        lo, hi = EXTRA_LIMITS[name]
+        print(f"\n=== {name}: SMHI parameter {param} = {titles.get(param, 'UNKNOWN - check this!')}")
+        for _, city in meta.iterrows():
+            for st in candidate_stations(city["lat"], city["lon"], since, param)[:MAX_CANDIDATES]:
+                if st["km"] > MAX_EXTRA_KM:
+                    print(f"  {city['city']}: nearest station with {name} is {st['km']} km away - too far")
+                    break
+                try:
+                    df = fetch_obs(st["id"], since, param=param)
+                except Exception as e:
+                    print(f"  {city['city']}: {st['station']} has no parameter {param} ({str(e)[:50]})")
+                    continue
+                n_bad = (~df.value.between(lo, hi)).sum()
+                df = df[df.value.between(lo, hi)]
+                share = hourly_share(df)
+                if share < 0.8:
+                    print(f"  {city['city']}: {st['station']} only {share:.0%} hourly - trying next")
+                    continue
+                df.rename(columns={"value": name}).to_csv(DATA_DIR / f"wx_{name}_{st['id']}.csv")
+                found.append({"city": city["city"], "variable": name, "weight": city["weight"],
+                              "id": st["id"], "station": st["station"], "km": st["km"]})
+                print(f"  {city['city']}: {st['station']} ({st['km']} km, {share:.0%} hourly"
+                      + (f", {n_bad} out-of-range values dropped" if n_bad else "") + ")")
+                break
+            else:
+                print(f"  {city['city']}: NO station within {MAX_CANDIDATES} candidates has {name}")
+    out = DATA_DIR / "wx_stations.csv"
+    pd.DataFrame(found).to_csv(out, index=False)
+    print(f"\nSaved {out}")
+    cov = pd.DataFrame(found).groupby("variable")["weight"].sum() if found else pd.Series(dtype=float)
+    print("Population weight covered per variable: " +
+          ", ".join(f"{v} {w:.0%}" for v, w in cov.items()))
+
+
+def refresh_extra(since: str) -> None:
+    """Re-download the extra weather history for the stations already chosen (daily job)."""
+    meta = pd.read_csv(DATA_DIR / "wx_stations.csv", dtype={"id": str})
+    param_of = {v: k for k, v in EXTRA_PARAMS.items()}
+    for _, r in meta.iterrows():
+        lo, hi = EXTRA_LIMITS[r["variable"]]
+        print(f"{r['city']} {r['variable']}:")
+        try:
+            df = fetch_obs(r["id"], since, param=param_of[r["variable"]])
+        except Exception as e:
+            print(f"  FAILED ({e}); keeping the cached file")
+            continue
+        df = df[df.value.between(lo, hi)]
+        df.rename(columns={"value": r["variable"]}).to_csv(DATA_DIR / f"wx_{r['variable']}_{r['id']}.csv")
+        print()
+
+
 # ------------------------------------------------------------------ forecasts
+def parse_forecast_vars(payload: dict) -> dict:
+    """All model-relevant variables from one SNOW1g response: {name: hourly Series}."""
+    times = [pd.Timestamp(e["time"]) for e in payload["timeSeries"]]
+    out = {}
+    for field, name in FORECAST_VARS.items():
+        vals = [e["data"].get(field) for e in payload["timeSeries"]]
+        s = pd.Series(vals, index=pd.DatetimeIndex(times), dtype=float).sort_index()
+        s.index = s.index.tz_convert("UTC")
+        s = s.where(s != 9999)
+        if name == "cloud" and s.notna().any() and s.max() <= 8:     # octas -> percent
+            s = s / 8 * 100
+        out[name] = s
+    return out
+
+
 def parse_forecast(payload: dict) -> pd.Series:
     """SNOW1g: timeSeries[i].time and timeSeries[i].data.air_temperature. 9999 = missing."""
     rows = {pd.Timestamp(e["time"]): e["data"].get("air_temperature") for e in payload["timeSeries"]}
@@ -211,44 +340,49 @@ def _forecast_point(city: str, meta: pd.DataFrame) -> tuple[float, float]:
 
 
 def fetch_regional_forecast(now: pd.Timestamp | None = None) -> tuple[Path | None, pd.DataFrame]:
-    """Fetch SNOW1g for every regional city; archive a compact bundle (temperature only).
+    """Fetch SNOW1g for every regional city; archive a compact bundle of all five variables.
     Cities that fail are simply missing; the caller checks weight coverage."""
     now = now or pd.Timestamp.now(tz="UTC")
     meta = pd.read_csv(REGIONAL_META, dtype={"id": str})
-    bundle, cols = {"fetched_utc": now.strftime("%Y-%m-%dT%H:%MZ"), "cities": {}}, {}
+    bundle = {"fetched_utc": now.strftime("%Y-%m-%dT%H:%MZ"), "cities": {}}
+    cols = {v: {} for v in FORECAST_VARS.values()}
     for city in meta.city:
         lat, lon = _forecast_point(city, meta)
         try:
             payload = get(FCST_URL.format(lon=round(lon, 4), lat=round(lat, 4))).json()
-            s = parse_forecast(payload)
+            series = parse_forecast_vars(payload)
         except Exception as e:
             print(f"  {city}: forecast FAILED ({e})")
             continue
-        cols[city] = s
+        for name, s in series.items():
+            cols[name][city] = s
         bundle["cities"][city] = {
-            "referenceTime": payload.get("referenceTime"),
-            "lat": lat, "lon": lon,
-            "series": {t.strftime("%Y-%m-%dT%H:%MZ"): (None if pd.isna(v) else float(v)) for t, v in s.items()},
+            "referenceTime": payload.get("referenceTime"), "lat": lat, "lon": lon,
+            "vars": {name: {t.strftime("%Y-%m-%dT%H:%MZ"): (None if pd.isna(v) else round(float(v), 2))
+                            for t, v in s.items()} for name, s in series.items()},
         }
-        print(f"  {city}: {len(s)} steps, issued {payload.get('referenceTime')}")
-    if not cols:
-        return None, pd.DataFrame()
+        print(f"  {city}: {len(series['temp'])} steps, issued {payload.get('referenceTime')}")
+    if not cols["temp"]:
+        return None, {}
     REGIONAL_FCST_DIR.mkdir(parents=True, exist_ok=True)
     out = REGIONAL_FCST_DIR / f"{now:%Y%m%dT%H%MZ}.json"
     out.write_text(json.dumps(bundle), encoding="utf-8")
-    print(f"Saved {out}  ({len(cols)} of {len(meta)} cities)")
-    return out, pd.DataFrame(cols)
+    print(f"Saved {out}  ({len(cols['temp'])} of {len(meta)} cities, {len(cols)} variables)")
+    return out, {k: pd.DataFrame(v) for k, v in cols.items() if v}
 
 
-def load_regional_forecast(path: Path) -> pd.DataFrame:
-    """Read an archived bundle back into a DataFrame (UTC index, one column per city)."""
+def load_regional_forecast(path: Path) -> dict:
+    """Archived bundle -> {variable: DataFrame of city columns}. Bundles written before the
+    extra variables existed hold temperature only, under the old "series" key."""
     bundle = json.loads(Path(path).read_text(encoding="utf-8"))
     cols = {}
     for city, c in bundle["cities"].items():
-        s = pd.Series(c["series"], dtype=float)
-        s.index = pd.to_datetime(s.index, utc=True)
-        cols[city] = s.sort_index()
-    return pd.DataFrame(cols)
+        per_var = c.get("vars") or {"temp": c.get("series", {})}
+        for name, series in per_var.items():
+            s = pd.Series(series, dtype=float)
+            s.index = pd.to_datetime(s.index, utc=True)
+            cols.setdefault(name, {})[city] = s.sort_index()
+    return {k: pd.DataFrame(v) for k, v in cols.items()}
 
 
 # ------------------------------------------------------------------ CLI
@@ -257,6 +391,7 @@ def main() -> None:
     p.add_argument("--forecast", action="store_true", help="archive the Stockholm SNOW1g forecast")
     p.add_argument("--regional-forecast", action="store_true", help="archive the 9-city SNOW1g forecasts")
     p.add_argument("--relookup", action="store_true", help="re-pick the regional stations (hourly only)")
+    p.add_argument("--extra", action="store_true", help="observed wind/cloud/humidity/rain history")
     p.add_argument("--regional", action="store_true", help="alias of --relookup when no station list exists yet")
     p.add_argument("--since", default="2023-01-01")
     a = p.parse_args()
@@ -268,18 +403,23 @@ def main() -> None:
     if a.regional_forecast:
         fetch_regional_forecast()
         return
+    if a.extra:
+        fetch_extra(a.since)
+        return
     if a.relookup or (a.regional and not REGIONAL_META.exists()):
         lookup_regional(a.since)
         return
 
     # Default (daily job): Stockholm history, then the saved regional stations
     for station in STATIONS:
-        df = fetch_obs(station, a.since)
+        df = fetch_obs(station, a.since).rename(columns={"value": "temp_c"})
         out = DATA_DIR / f"temp_obs_{station}.csv"
         df.to_csv(out)
         print(f"Saved {out}\n")
     if REGIONAL_META.exists():
         refresh_regional(a.since)
+    if (DATA_DIR / "wx_stations.csv").exists():
+        refresh_extra(a.since)
     else:
         print("No regional station list yet - run: python src/fetch_weather.py --relookup")
 

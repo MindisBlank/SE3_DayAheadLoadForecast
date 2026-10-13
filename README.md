@@ -12,11 +12,15 @@ Every morning a GitHub Actions job pulls the latest load and weather data, publi
 
 Running since 18 September 2026. Rolling error is in [`scores/daily.csv`](scores/daily.csv) and on the live page.
 
-| Period | Model version | Days | Model MAE | Baseline MAE | In 80 % range | Fallback days |
-|---|---|---|---|---|---|---|
-| _to be filled in after the first 7 scored days of v2_ | | | | | | |
+| Period | Model version | Days | Model MAE | Baseline MAE | Beat baseline | In 80 % range | Fallback days |
+|---|---|---|---|---|---|---|---|
+| 19–22 Sep 2026 | v1 | 4 | 220 MW (2.66 %) | 244 MW | 2 of 4 | – | 0 |
+| 23 Sep – 11 Oct 2026 | v2 | 19 | **243 MW (2.74 %)** | 385 MW | **17 of 19** | **84.5 %** | 0 |
+| … excluding 5 Oct | v2 | 18 | 218 MW (2.52 %) | 376 MW | 17 of 18 | | |
 
-The first days (19–22 Sep) ran v1; v2 runs from 23 Sep. Scores are kept per version, so the two are never mixed.
+Scores are kept per version, so versions are never mixed. Zero fallback days and zero skipped days so far: every run has published a model forecast. The range is holding slightly wide – 84.5 % of hours inside an 80 % band – which is the safe direction to be wrong in. One day, 5 October, accounts for 25 MW of the 19-day v2 average on its own; it is written up under Incidents rather than quietly dropped.
+
+**The honest caveat on all of this:** only 4 of those 19 forecasts were issued before the day-ahead gate closure. The rest were published before the day they predict, so the track record is real, but too late to have been bid into the market. That is a limitation of free hosted cron rather than of the model, it could not be fixed by scheduling earlier without a worse trade-off, and it is written up in full under Incidents.
 
 ### Backtest
 
@@ -54,11 +58,13 @@ Caveats: the range is slightly too wide in winter (84–93 % held) and too narro
 | Step | Script | What it does |
 |---|---|---|
 | 1 | `src/fetch.py --update` | Pulls SE3 actual total load from ENTSO-E, re-fetching the last 3 days to pick up late corrections |
-| 2 | `src/fetch_weather.py` | Pulls observed hourly temperature from SMHI for the 9 regional stations in [`data/regional_stations.csv`](data/regional_stations.csv) |
-| 3 | `src/forecast.py` | Fetches SMHI SNOW1g point forecasts for the 9 cities, retrains LightGBM on all history, and writes `forecasts/<date>.csv` |
+| 2 | `src/fetch_weather.py` | Pulls observed hourly temperature from SMHI for the 9 regional stations in [`data/regional_stations.csv`](data/regional_stations.csv), plus wind, cloud cover, humidity and precipitation for the stations in [`data/wx_stations.csv`](data/wx_stations.csv) |
+| 3 | `src/forecast.py` | Fetches SMHI SNOW1g point forecasts (all five variables) for the 9 cities, retrains LightGBM on all history, applies the bias correction, and writes `forecasts/<date>.csv` |
 | 4 | `src/score.py` | Rebuilds `scores/` from all published forecasts and writes `docs/data.json` for the live page |
 
-**Features:** population-weighted temperature over 9 SE3 cities (v2), its 24-hour mean, heating degree-hours, load 48 h and 168 h earlier, and Swedish-local-time calendar features (hour, weekday, day of year, public holidays, eves such as Midsommarafton and Julafton, bridge days, the Christmas period).
+**Features:** population-weighted temperature over 9 SE3 cities (v2), its 24-hour mean, heating degree-hours, load 48 h and 168 h earlier, and Swedish-local-time calendar features (hour, weekday, day of year, public holidays, eves such as Midsommarafton and Julafton, bridge days, the Christmas period). v3 adds weighted wind, cloud cover, humidity and precipitation, a wind-chill style interaction and 24-hour means of wind and cloud.
+
+**Bias correction (v3):** the model under-forecasts, so every hour of tomorrow is shifted by the median of the model's last three scored daily mean errors, of which 0.4 is applied, capped at ±150 MW and skipped on holidays, eves and bridge days. Only days that were fully scored before the forecast was made are used, and the shift each forecast received is recorded in `bias_shift_mw` and added back before the next day's median, so the filter always measures the model's bias rather than its own correction. The settings come from a sweep (below), not from a guess.
 
 The shortest load lag is 48 hours on purpose. When the forecast for day D is made on the morning of D-1, the evening of D-1 has not happened yet, so a 24-hour lag would leak information that is not available in real life.
 
@@ -66,10 +72,11 @@ The shortest load lag is 48 hours on purpose. When the forecast for day D is mad
 
 The job never stops because an API is down. It takes the best path available and logs which one in [`forecasts/run_log.csv`](forecasts/run_log.csv):
 
-1. **v2 model** with fresh SMHI forecasts for the 9 cities, or the newest archived set that still covers tomorrow. Cities that fail are left out and the weights renormalised, as long as at least 80 % of the weight is present for every hour.
-2. **v1 model** (Stockholm temperature only) if the regional forecasts don't cover enough
-3. **baseline** if no usable weather forecast exists or the load data is stale
-4. **skipped** if even last week's load is missing; nothing is published
+1. **v3 model** with fresh SMHI forecasts for the 9 cities, or the newest archived set that still covers tomorrow, plus wind / cloud / humidity / rain, then the bias correction. Cities that fail are left out and the weights renormalised, as long as at least 80 % of the weight is present for every hour.
+2. **v2 model** (temperature only) if the extra weather has a gap in the target day. The same model code trains on whichever columns are present, so this is a feature-set fallback, not a second model to maintain.
+3. **v1 model** (Stockholm temperature only) if the regional forecasts don't cover enough
+4. **baseline** if no usable weather forecast exists or the load data is stale
+5. **skipped** if even last week's load is missing; nothing is published
 
 A published forecast file is never overwritten. Backtest predictions live in `backtest/` (not committed; reproducible) and never in `forecasts/`.
 
@@ -82,6 +89,9 @@ Every forecast file records the `model_version` that produced it. A version chan
 | v1 | 18 Sep 2026 | LightGBM, Stockholm temperature (one station) | 306 / 321 MW |
 | v2 | 23 Sep 2026 | Same model, temperature = population-weighted mean over 9 SE3 cities | 269 / 290 MW |
 | v2 + range | 22 Sep 2026 (code) | 80 % range added next to the unchanged point forecast | coverage 81.5 / 83.0 % |
+| v3 | 14 Oct 2026 | + wind, cloud, humidity, rain, and a self-correcting bias filter | 264 MW single-split, 249 MW walk-forward |
+
+The v3 row is walk-forward (retrain, forecast one day, learn the error, repeat), so it is not comparable with the single-split v1/v2 numbers above it; the two changes are measured separately against the same walk-forward v2 in the two sections below – the weather variables are worth 4–10 MW and the bias filter 1–8 MW on those years (and 19 MW on the held-out live window, which is where the bias actually is).
 
 How v2 was chosen: [`src/experiment.py`](src/experiment.py) backtests six variants on the same hours. Only the regional temperature won on both years; everything else was worse than v1. (The table below is the original experiment run, before the Västerås station was replaced with an hourly one; the final v2 numbers above come from `src/model.py` after the fix.)
 
@@ -93,6 +103,71 @@ How v2 was chosen: [`src/experiment.py`](src/experiment.py) backtests six varian
 | + recent data weighted more | 356 | 475 | 479 | −84 |
 | **9-city temperature (v2)** | **280** | **335** | **410** | **−57** |
 | 9-city + change + level | 332 | 442 | 465 | −49 |
+
+### Weather variables (live in v3)
+
+Walk-forward test over both test years, one variable at a time, change in MAE against v2:
+
+| Added | 2024–25 | 2025–26 |
+|---|---|---|
+| cloud cover | −5.8 MW | −7.6 MW |
+| humidity | −11.6 MW | −1.9 MW |
+| rain | −3.4 MW | −1.0 MW |
+| wind | **+2.1 MW** | **+5.8 MW** |
+| all four together | −9.7 MW | −4.4 MW |
+
+Cloud cover is the strongest single addition, which fits lighting demand plus behind-the-meter solar. Rain helps slightly and consistently. Wind on its own makes the model *worse* in both years, and adding it to cloud dilutes cloud's gain, so the wind-chill interaction looks like noise the trees overfit. All four together still win, as boosted trees route around a weak feature. The gaps are 1–4 % of MAE: consistent in sign across two years, but not individually significant.
+
+### Bias correction (how the settings were chosen)
+
+The model under-forecasts in every period tested: its mean error runs from −20 MW on the calmest year to −130 MW on the most recent window. A constant adder would hide that rather than fix it, so instead the forecast is shifted by the model's own measured bias, which lets it follow a drift and unwind if the bias goes away.
+
+That leaves five knobs, so [`src/filter_sweep.py`](src/filter_sweep.py) tries all 1,320 combinations of them: how fast the filter follows a drift (half-life 1–60 days), how much of the measured bias it actually applies (damping 0.1–1.0), mean or median, a cap (none / 150 / 300 MW), and whether to apply it on holidays and eves. The expensive part – the walk-forward predictions – is computed once and cached, so the sweep itself costs seconds.
+
+The protocol was fixed before looking at the numbers:
+
+- settings are **chosen on the two historical years** (Sep 2024 – Aug 2026); the live window (Sep–Oct 2026) is **held out** and only used to check the choice afterwards
+- the choice is simply the **lowest error** – MAE pooled over all selection hours at once, not the average of the two years' MAEs, because 2024 has 257 scored days to 2025's 347 and averaging two MAEs would weight a day in the thinner year more
+- **one kill switch**, doing the only job a kill switch has: discarding a setting whose error saturates above the baseline *across periods*. A setting is dropped only if it is more than 3 % worse than no filter on **both** selection periods. Two of 1,320 settings were. A check that rejects on a single period, or on one bad day, is a tie-breaker wearing a safety check's clothes – it will throw out the best setting because of one unlucky day, and an earlier version of this file did exactly that
+
+The chosen filter is the lowest-error one: **median of the last 3 scored days, of which 0.4 is applied, capped at ±150 MW, not applied on holidays/eves/bridge days**.
+
+| Period | Days | MAE no filter | MAE with filter | Bias no filter | Bias with filter |
+|---|---|---|---|---|---|
+| Sep 2024 – Aug 2025 (selection) | 257 | 250.9 MW | **249.7 MW** (−0.5 %) | −20 MW | −13 MW |
+| Sep 2025 – Aug 2026 (selection) | 347 | 257.4 MW | **249.0 MW** (−3.3 %) | −25 MW | −14 MW |
+| pooled selection | 604 | 254.7 MW | **249.3 MW** (−2.1 %) | | |
+| Sep–Oct 2026 (**held out**) | 41 | 203.5 MW | **184.2 MW** (−9.4 %) | −130 MW | −83 MW |
+
+Damping 0.4 is an **interior** optimum rather than the edge of the grid – 0.3 scores 249.6 and 0.5 scores 249.5 against 249.3 – which is worth checking before believing any swept parameter. The best twelve settings sit within 0.4 MW of each other, so this is a plateau and no claim is made that these exact five numbers are special; a cap of 150 MW appears in all twelve, which is the one setting other than damping that clearly earns its place.
+
+The gain on the historical years is small – 2.1 % pooled – because those years are barely biased. Almost all of the filter's value is in the held-out window, for the reason in the next section.
+
+The day counts above are days that have a prediction at all: 2024 has 257 of 365, because SMHI's rain series starts in 2024 and a prediction needs every weather value for the target day.
+
+### What the held-out window actually shows
+
+The bias in the two historical years is −20 to −25 MW, and the model is under-forecasting on roughly half the days – which is what an unbiased model looks like. The live window is different:
+
+| | Sep 2024 – Aug 2025 | Sep 2025 – Aug 2026 | Sep–Oct 2026 |
+|---|---|---|---|
+| Mean daily error | −23 MW | −28 MW | **−130 MW** |
+| Days under-forecast | 139 of 257 | 202 of 347 | **36 of 41** |
+
+−130 MW with a day-to-day standard deviation of 146 over 41 days puts the standard error of that mean at 23 MW, so it is about five standard errors from the historical level. It is not sampling noise. Looking at it week by week, it is also not a seasonal ramp:
+
+| Week | Mean daily error |
+|---|---|
+| 1–7 Sep | +8 MW |
+| 8–15 Sep | −132 MW |
+| 16–22 Sep | −132 MW |
+| 23–29 Sep | −167 MW |
+| 30 Sep – 6 Oct | −235 MW |
+| 7–12 Oct | −123 MW |
+
+The first week is clean and then it steps down and stays down. The gap is also flat across the day (−56 to −184 MW at every hour, slightly worse overnight), which is the signature of a level shift rather than a shape error – the model has the daily curve right and the base wrong. Best read: SE3 load stepped up by something over 1 % in early September 2026, and a model trained on 2023–2026 does not know it yet.
+
+That is a case for a bias filter rather than a retune, and it is also why the filter earns 9.4 % here against 2.1 % on the historical years. The honest limitation: at damping 0.4 the filter removes about a third of a step like this (−130 MW to −83 MW), and a stronger setting would remove more – damping 1.0 takes the live bias to −29 MW. It is not chosen because it is worse on the selection periods, where there is no step to chase and a heavy correction only adds noise. If the step turns out to be permanent, the right fix is not a heavier filter but giving the model a recent-level feature, which lost on historical data for the same reason: those years have no step in them. The live scoring will settle it.
 
 ## Data decisions
 
@@ -106,7 +181,19 @@ How v2 was chosen: [`src/experiment.py`](src/experiment.py) backtests six varian
 
 ## Incidents
 
-**18–22 Sep 2026: forecasts issued after gate closure.** The job was scheduled for 08:15 UTC, but GitHub started it 4–7 hours late every day (12:28–15:04 UTC). Every forecast was still published before the day it predicts, so the track record is valid, but after the 10:00 UTC day-ahead gate closure, so it could not have been used for bidding. Fix: three trigger times (04:37, 06:07, 07:37 UTC). The first run that gets through publishes and later ones only refresh the scores. Each forecast now records `before_gate_closure`, and the live page shows it per day.
+**18–22 Sep 2026: forecasts issued after gate closure. Attempted fix did not work; limitation accepted.** The job was first scheduled for 08:15 UTC, but GitHub started it 4–7 hours late every day (12:28–15:04 UTC). Every forecast was still published before the day it predicts, so the track record is valid, but after the 10:00 UTC day-ahead gate closure, so it could not have been bid into the market.
+
+The fix tried was three earlier triggers (04:37, 06:07, 07:37 UTC). **It did not work, and the run log says so.** Over the following ten days the first run of each day actually started between 10:01 and 12:22 UTC – a queue delay of 5 h 24 m to 7 h 45 m, consistently – so only **4 of 19** forecasts landed before gate closure. GitHub delays scheduled workflows under load on every plan; this is not something a paid plan fixes.
+
+Beating a 7 h 45 m delay would mean firing the first trigger at 02:07 UTC, and that runs into the data: at that hour ENTSO-E has published through about D−1 01:00, the 3-hour settle rule trims it to D−2 22:00, and the 48-hour lag needs D−2 21:00 – one hour of margin. A slow morning there would publish a *baseline* forecast, and since a forecast file is never overwritten, that would lock the day into a baseline. Trading a gate-closure miss for an occasional baseline day is the worse deal, so the schedule stays where it is.
+
+**The limitation is therefore permanent and stated rather than fixed:** these are genuine before-the-fact forecasts, published and timestamped before the day they predict, but mostly an hour or two too late to have been bid into the day-ahead market. Every forecast records `before_gate_closure` and the live page shows it per day, so the subset that did make the deadline can be read off directly. Nothing here is a claim about market usability.
+
+**5 Oct 2026: a 2.6 GW midday spike the model had no way to see.** The forecast for Monday 5 October was out by 677 MW on daily average – the worst day of the live record by a factor of two – and 17 of 24 hours fell outside the 80 % range. The cause was not the pipeline and not the weather: the temperature forecast for that day was accurate to −0.31 °C on average and 1.12 °C at worst, and the run completed normally on fresh SMHI data.
+
+What happened is that actual load spiked to **12,008 MW at 11:00 local**, against a forecast of 9,394 MW and a typical early-October Monday peak of 9,700–10,700 MW in the morning or evening. The excursion lasted about three hours (09:00–12:00 local, +1.3 to +2.6 GW), then load returned to normal for the rest of the day; the surrounding Monday peaks were 9,742 MW on 28 Sep and 10,738 MW on 12 Oct, both at the usual times. A 25 % three-hour jump at midday on a mild day (14 °C) is not a demand shape any weather-driven model produces, and the value is in ENTSO-E's settled data, so it is not the preliminary-value problem either.
+
+No code change: nothing in the pipeline failed and nothing would have predicted it. It is recorded here because a single day moved the 19-day average by 25 MW, and the headline numbers above show the record with and without it. The 80 % range is doing its job by being visibly wrong on a day like this rather than quietly wide enough to swallow it.
 
 _Any other day the job falls back or skips gets a short write-up here: what failed, what the job did, and what changed._
 
@@ -118,10 +205,13 @@ conda env create -f environment.yml && conda activate se3
 python src/fetch.py --start 2023-01-01 --end 2026-09-01   # load history
 python src/fetch_weather.py --relookup                     # pick the 9 regional stations (first time only)
 python src/fetch_weather.py                                # temperature history
+python src/fetch_weather.py --extra                        # wind / cloud / humidity / rain (first time only)
 python src/features.py --check                             # alignment checks
 python src/baseline.py                                     # baseline error
-python src/model.py                                        # backtest v2 vs baseline (--temp stockholm for v1)
+python src/model.py --weather                              # backtest v3 vs baseline (--temp stockholm for v1)
 python src/experiment.py                                   # compare model variants
+python src/experiment_adaptive.py --ablation                # which weather variable earns its place
+python src/filter_sweep.py                                 # choose the bias filter (minutes, then cached)
 python src/forecast.py --dry-run                           # tomorrow's forecast, writes nothing
 ```
 
@@ -129,9 +219,10 @@ python src/forecast.py --dry-run                           # tomorrow's forecast
 
 ```
 src/                 fetch, features, baseline, model, forecast, score
+                     experiment*, filter_sweep: offline studies, never touch forecasts/
 forecasts/           one file per day: the public prediction record, plus run_log.csv
 scores/              forecast vs actual vs baseline, rebuilt daily
-data/                load history, temperature history, archived SMHI forecasts
+data/                load history, weather history, archived SMHI forecasts, station lists
 docs/                the GitHub Pages site (index.html + data.json)
 .github/workflows/   the daily job
 ```

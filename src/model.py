@@ -2,9 +2,14 @@
 
 Usage:
     python src/model.py                        # backtest v2 (regional temperature) on the held-out year
+    python src/model.py --weather              # backtest v3 (+ wind / cloud / humidity / rain)
     python src/model.py --temp stockholm       # backtest v1 (Stockholm temperature only)
     python src/model.py --test-start 2024-09-01 --test-end 2025-09-01   # a second year
     python src/model.py --final                # train on ALL data, save models/lgbm_load.txt
+
+Which features a model uses is decided by the frame it is handed: feature_list() takes the
+14 base features plus any wx_* columns present, so the same code trains v2 and v3.
+The v3 bias correction lives here too (BIAS_FILTER / bias_shift), applied by forecast.py.
 
 Forecast range (P10-P90, an 80 % range): built from OUT-OF-SAMPLE errors of the point model.
 The training history is cut into 4 time blocks; for each block the model is trained on the
@@ -37,7 +42,8 @@ ROOT = Path(__file__).resolve().parent.parent
 TARGET = "load_mw"
 # Model versions: same features and settings, different temperature input.
 # Every published forecast records which one produced it.
-VERSIONS = {"stockholm": "v1", "regional": "v2"}
+VERSIONS = {"stockholm": "v1", "regional": "v2", "regional+weather": "v3"}
+
 FEATURES = [
     "temp_c", "temp_24h_mean", "hdh",
     "load_lag_48", "load_lag_168",
@@ -61,11 +67,48 @@ PARAMS = {
 RANGE = (0.10, 0.90)   # P10 and P90: an 80 % range
 RESID_FOLDS = 4
 
+# v3 bias correction: the lowest-error setting from src/filter_sweep.py, chosen on the two
+# historical test years with the live window held out to check it. The median of the model's
+# last 3 scored days, of which 0.4 is applied, capped at +-150 MW, and not applied on
+# holidays/eves/bridge days. Damping 0.4 is an interior optimum, not a grid edge (0.3 scores
+# 249.6 and 0.5 scores 249.5 against 249.3), and the top twelve settings sit within 0.4 MW
+# of each other - a plateau, so no claim is made that these exact numbers are special.
+BIAS_FILTER = {"half_life": 1, "damping": 0.4, "stat": "median", "cap": 150, "skip_days_off": True}
 
-def train(df: pd.DataFrame) -> lgb.Booster:
+
+def feature_list(df: pd.DataFrame) -> list:
+    """v2 features, plus whatever weather columns the frame carries (that is what makes it v3).
+    Every function below takes `feats`; leaving it out means "use whatever this frame has"."""
+    return FEATURES + sorted(c for c in df.columns if c.startswith("wx_"))
+
+
+def required(feats: list) -> list:
+    """The features a training row must actually have. The weather columns are NOT required:
+    SMHI observes rain only from 2024 and cloud only at some stations, so insisting on them
+    would throw away 13,000 of 33,000 training hours - 40 % of the history, to gain the
+    weakest feature in the set. LightGBM routes missing values to a learned side instead, so
+    a row with no rain reading still teaches the model everything else it knows. Live
+    forecasts are checked separately (forecast.py only runs v3 when every weather value for
+    the target day is present), so the model never has to guess at prediction time."""
+    return [c for c in feats if not c.startswith("wx_")] + [TARGET]
+
+
+def bias_shift(daily_err: pd.Series, cfg: dict = BIAS_FILTER) -> float:
+    """MW to subtract from tomorrow's forecast, from daily mean errors (forecast - actual)
+    of days that were already scored. Returns 0 when there is no history yet."""
+    d = daily_err.dropna()
+    if d.empty:
+        return 0.0
+    window = int(2 * cfg["half_life"]) + 1
+    val = d.tail(window).median() if cfg["stat"] == "median" else d.ewm(halflife=cfg["half_life"]).mean().iloc[-1]
+    return float(np.clip(val * cfg["damping"], -cfg["cap"], cfg["cap"]))
+
+
+def train(df: pd.DataFrame, feats: list | None = None) -> lgb.Booster:
     """Native LightGBM API (no scikit-learn needed)."""
-    d = df.dropna(subset=FEATURES + [TARGET])
-    return lgb.train(PARAMS, lgb.Dataset(d[FEATURES], label=d[TARGET]), num_boost_round=NUM_ROUNDS)
+    feats = feature_list(df) if feats is None else feats
+    d = df.dropna(subset=required(feats))
+    return lgb.train(PARAMS, lgb.Dataset(d[feats], label=d[TARGET]), num_boost_round=NUM_ROUNDS)
 
 
 def error_bucket(df: pd.DataFrame) -> pd.Series:
@@ -77,21 +120,22 @@ def error_bucket(df: pd.DataFrame) -> pd.Series:
     return pd.Series(np.where(off, "day_off", np.char.add(np.char.add(season, "_"), part)), index=df.index)
 
 
-def out_of_sample_errors(train_df: pd.DataFrame) -> pd.Series:
+def out_of_sample_errors(train_df: pd.DataFrame, feats: list | None = None) -> pd.Series:
     """actual - forecast for every training hour, each predicted by a model that did not see it."""
-    d = train_df.dropna(subset=FEATURES + [TARGET])
+    feats = feature_list(train_df) if feats is None else feats
+    d = train_df.dropna(subset=required(feats))
     blocks = np.array_split(np.arange(len(d)), RESID_FOLDS)       # contiguous in time
     errs = []
     for idx in blocks:
         held = d.iloc[idx]
-        model = train(d.drop(held.index))
-        errs.append(held[TARGET] - model.predict(held[FEATURES]))
+        model = train(d.drop(held.index), feats)
+        errs.append(held[TARGET] - model.predict(held[feats]))
     return pd.concat(errs)
 
 
-def error_quantiles(train_df: pd.DataFrame) -> pd.DataFrame:
+def error_quantiles(train_df: pd.DataFrame, feats: list | None = None) -> pd.DataFrame:
     """10th/90th percentile of out-of-sample error per bucket, plus an 'all' fallback row."""
-    err = out_of_sample_errors(train_df)
+    err = out_of_sample_errors(train_df, feats)
     b = error_bucket(train_df.loc[err.index])
     q = err.groupby(b).quantile(list(RANGE)).unstack()
     q.loc["all"] = err.quantile(list(RANGE)).values
@@ -99,10 +143,11 @@ def error_quantiles(train_df: pd.DataFrame) -> pd.DataFrame:
     return q
 
 
-def fit_predict_all(train_df: pd.DataFrame, X: pd.DataFrame) -> pd.DataFrame:
+def fit_predict_all(train_df: pd.DataFrame, X: pd.DataFrame, feats: list | None = None) -> pd.DataFrame:
     """Point forecast plus P10/P90 for the rows of X. Used by the backtest AND the live forecast."""
-    point = pd.Series(train(train_df).predict(X[FEATURES]), index=X.index)
-    q = error_quantiles(train_df)
+    feats = feature_list(train_df) if feats is None else feats
+    point = pd.Series(train(train_df, feats).predict(X[feats]), index=X.index)
+    q = error_quantiles(train_df, feats)
     b = error_bucket(X)
     lo = b.map(q["lo"]).fillna(q.loc["all", "lo"])
     hi = b.map(q["hi"]).fillna(q.loc["all", "hi"])
@@ -132,16 +177,18 @@ def fmt(res: dict) -> str:
 
 
 def backtest(df: pd.DataFrame, start: str, end: str, suffix: str = "") -> None:
+    feats = feature_list(df)
     t0, t1 = pd.Timestamp(start, tz="UTC"), pd.Timestamp(end, tz="UTC")
     train_df = df[df.index < t0]
-    test_df = df[(df.index >= t0) & (df.index < t1)].dropna(subset=FEATURES + [TARGET])
+    test_df = df[(df.index >= t0) & (df.index < t1)].dropna(subset=required(feats))
 
-    print(f"Train: {train_df.index.min():%Y-%m-%d} -> {t0:%Y-%m-%d}  ({len(train_df.dropna(subset=FEATURES + [TARGET]))} h)")
+    print(f"Features: {len(feats)} ({', '.join(c for c in feats if c.startswith('wx_')) or 'no weather'})")
+    print(f"Train: {train_df.index.min():%Y-%m-%d} -> {t0:%Y-%m-%d}  ({len(train_df.dropna(subset=required(feats)))} h)")
     print(f"Test:  {start} -> {end}  ({len(test_df)} h)\n")
 
-    model = train(train_df)
-    pred = pd.Series(model.predict(test_df[FEATURES]), index=test_df.index)
-    rng = fit_predict_all(train_df, test_df)            # point model is retrained too (same seed)
+    model = train(train_df, feats)
+    pred = pd.Series(model.predict(test_df[feats]), index=test_df.index)
+    rng = fit_predict_all(train_df, test_df, feats)      # point model is retrained too (same seed)
     base = test_df["load_lag_168"]
     y = test_df[TARGET]
 
@@ -172,7 +219,7 @@ def backtest(df: pd.DataFrame, start: str, end: str, suffix: str = "") -> None:
     for name, mask in [("days off", days_off), ("normal", ~days_off)]:
         print(f"  {name:9s} baseline {(base - y)[mask].abs().mean():6.0f}   model {(pred - y)[mask].abs().mean():6.0f}")
 
-    imp = pd.Series(model.feature_importance(importance_type="gain"), index=FEATURES)
+    imp = pd.Series(model.feature_importance(importance_type="gain"), index=feats)
     print("\nFeature importance (share of gain):")
     print((imp / imp.sum() * 100).sort_values(ascending=False).round(1).to_string())
 
@@ -189,12 +236,15 @@ def main() -> None:
     p.add_argument("--test-start", default="2025-09-01")
     p.add_argument("--test-end", default="2026-09-01")
     p.add_argument("--final", action="store_true", help="train on all data and save the model")
-    p.add_argument("--temp", choices=list(VERSIONS), default="regional",
+    p.add_argument("--temp", choices=["stockholm", "regional"], default="regional",
                    help="temperature input: regional (v2, live) or stockholm (v1)")
+    p.add_argument("--weather", action="store_true",
+                   help="add wind/cloud/humidity/rain (v3; needs fetch_weather.py --extra)")
     a = p.parse_args()
 
-    print(f"Model {VERSIONS[a.temp]} ({a.temp} temperature)")
-    df = build_dataset(a.temp)
+    key = "regional+weather" if a.weather and a.temp == "regional" else a.temp
+    print(f"Model {VERSIONS[key]} ({key.replace('+', ' + ')})")
+    df = build_dataset(a.temp, weather=a.weather)
     if a.final:
         model = train(df)
         out = ROOT / "models" / "lgbm_load.txt"
@@ -202,8 +252,9 @@ def main() -> None:
         model.save_model(str(out))
         print(f"Trained on {df.index.min():%Y-%m-%d} -> {df.index.max():%Y-%m-%d}; saved {out}")
     else:
-        # v2 keeps the plain file name (compare_tso.py reads it); v1 gets a suffix
-        backtest(df, a.test_start, a.test_end, suffix="" if a.temp == "regional" else "_v1")
+        # v2 keeps the plain file name (compare_tso.py reads it); v1 and v3 get a suffix
+        suffix = {"stockholm": "_v1", "regional": "", "regional+weather": "_v3"}[key]
+        backtest(df, a.test_start, a.test_end, suffix=suffix)
 
 
 if __name__ == "__main__":

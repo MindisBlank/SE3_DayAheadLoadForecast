@@ -1,0 +1,17 @@
+city,variable,weight,id,station,km
+Stockholm,wind,0.38,97200,Stockholm-Bromma Flygplats,6.0
+Göteborg,wind,0.2,71420,Göteborg A,0.0
+Uppsala,wind,0.08,97510,Uppsala Aut,0.0
+Linköping,wind,0.08,85240,Linköping-Malmslätt,0.0
+Stockholm,humidity,0.38,98230,Stockholm-Observatoriekullen A,0.0
+Göteborg,humidity,0.2,71420,Göteborg A,0.0
+Uppsala,humidity,0.08,97510,Uppsala Aut,0.0
+Linköping,humidity,0.08,85240,Linköping-Malmslätt,0.0
+Stockholm,precip,0.38,98230,Stockholm-Observatoriekullen A,0.0
+Göteborg,precip,0.2,71420,Göteborg A,0.0
+Uppsala,precip,0.08,97510,Uppsala Aut,0.0
+Linköping,precip,0.08,85240,Linköping-Malmslätt,0.0
+Stockholm,cloud,0.38,98040,Berga,30.6
+Göteborg,cloud,0.2,71380,Vinga A,24.8
+Uppsala,cloud,0.08,97530,Uppsala Flygplats,6.3
+Linköping,cloud,0.08,85240,Linköping-Malmslätt,0.0
