@@ -104,3 +104,4 @@ run_utc,target_date,method,note,model_version,before_gate_closure,bias_shift_mw
 2026-10-24T12:11Z,2026-10-25,exists,2026-10-25.csv already published,,,
 2026-10-25T09:21Z,2026-10-25,exists,2026-10-25.csv already published,,,
 2026-10-25T11:13Z,2026-10-25,exists,2026-10-25.csv already published,,,
+2026-10-25T12:44Z,2026-10-25,exists,2026-10-25.csv already published,,,
