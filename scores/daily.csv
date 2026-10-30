@@ -38,3 +38,4 @@ date,method,model_version,before_gate_closure,hours,mae_model,mae_baseline,mape_
 2026-10-25,model,v3,True,25,182.36,712.32,2.15,8.4,96.19,92.0,819.13
 2026-10-27,baseline,baseline,True,24,649.12,649.12,7.09,7.09,255.26,,
 2026-10-28,model,v3,True,24,259.3,529.85,2.71,5.64,85.37,66.67,822.54
+2026-10-29,model,v3,True,24,209.3,236.62,2.22,2.43,39.13,83.33,824.15
