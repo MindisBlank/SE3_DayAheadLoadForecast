@@ -161,3 +161,4 @@ run_utc,target_date,method,note,model_version,before_gate_closure,bias_shift_mw
 2026-11-12T16:10Z,2026-11-13,exists,2026-11-13.csv already published,,,
 2026-11-13T12:34Z,2026-11-14,model,trained on 33726 h on 21 features; bias shift +56 MW from 53 scored day(s); weather: smhi regional 9 cities (fresh),v3,False,56.0
 2026-11-13T14:28Z,2026-11-14,exists,2026-11-14.csv already published,,,
+2026-11-13T15:39Z,2026-11-14,exists,2026-11-14.csv already published,,,
