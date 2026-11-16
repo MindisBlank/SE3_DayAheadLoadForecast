@@ -169,3 +169,4 @@ run_utc,target_date,method,note,model_version,before_gate_closure,bias_shift_mw
 2026-11-15T13:51Z,2026-11-16,exists,2026-11-16.csv already published,,,
 2026-11-15T14:57Z,2026-11-16,exists,2026-11-16.csv already published,,,
 2026-11-16T13:08Z,2026-11-17,baseline,load data stale (ends 2026-11-15 10:00:00+00:00); weather: none,baseline,False,0.0
+2026-11-16T15:34Z,2026-11-17,exists,2026-11-17.csv already published,,,
