@@ -49,8 +49,15 @@ LOG = FCST_DIR / "run_log.csv"
 
 # ------------------------------------------------------------------ time helpers
 def target_hours(now: pd.Timestamp) -> tuple[str, pd.DatetimeIndex]:
-    """UTC hours of tomorrow's local calendar day (handles the DST 23/25 h days)."""
-    tomorrow = (now.tz_convert(LOCAL_TZ).normalize() + pd.Timedelta(days=1)).date()
+    """UTC hours of tomorrow's local calendar day (handles the DST 23/25 h days).
+
+    `date() + timedelta(days=1)` steps one CALENDAR day. Adding pd.Timedelta(days=1) to a
+    tz-aware timestamp instead adds an absolute 24 hours, which is not the same thing on the
+    autumn changeover: that local day has 25 hours, so midnight + 24 h is still the same
+    date, and the job spends the day re-publishing today. That cost one silently missing
+    forecast on 25 Oct 2026, and would have cost one every autumn.
+    """
+    tomorrow = now.tz_convert(LOCAL_TZ).date() + timedelta(days=1)
     start = pd.Timestamp(tomorrow, tz=LOCAL_TZ)
     end = pd.Timestamp(tomorrow + timedelta(days=1), tz=LOCAL_TZ)
     idx = pd.date_range(start, end, freq="h", inclusive="left").tz_convert("UTC")
@@ -209,12 +216,18 @@ def main() -> None:
         log_run({**run, "method": "skipped", "model_version": "none", "before_gate_closure": on_time,
                  "note": f"load data ends {load.index.max()}; even last week's values are missing"}, a.dry_run)
         return
-    lag48_ok = load.shift(48, freq="h").reindex(hours).notna().all()
+    lag48 = load.shift(48, freq="h").reindex(hours)
+    lag48_ok = bool(lag48.notna().all())
 
     notes, rng, version, weather_src, temp_used = [], None, None, "none", None
 
     if not lag48_ok:
-        notes.append(f"load data stale (ends {load.index.max()})")
+        # Name the hours, not just the end of the series: a truncated tail and an interior
+        # hole both land here, and the note is the only record of which it was.
+        gaps = lag48[lag48.isna()].index - pd.Timedelta(hours=48)
+        notes.append(f"load data stale: {len(gaps)} of {len(hours)} target hours lack their "
+                     f"48 h lag ({gaps.min():%Y-%m-%d %H:%M} to {gaps.max():%Y-%m-%d %H:%M} UTC); "
+                     f"load ends {load.index.max()}")
     else:
         # ---- 1. v2: regional temperature
         regional_seen = None

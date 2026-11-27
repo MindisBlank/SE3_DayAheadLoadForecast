@@ -10,17 +10,22 @@ Every morning a GitHub Actions job pulls the latest load and weather data, publi
 
 ### Live
 
-Running since 18 September 2026. Rolling error is in [`scores/daily.csv`](scores/daily.csv) and on the live page.
+Running since 18 September 2026, scored through 25 November 2026 – 67 days. Rolling error is in [`scores/daily.csv`](scores/daily.csv) and on the live page.
 
-| Period | Model version | Days | Model MAE | Baseline MAE | Beat baseline | In 80 % range | Fallback days |
-|---|---|---|---|---|---|---|---|
-| 19–22 Sep 2026 | v1 | 4 | 220 MW (2.66 %) | 244 MW | 2 of 4 | – | 0 |
-| 23 Sep – 11 Oct 2026 | v2 | 19 | **243 MW (2.74 %)** | 385 MW | **17 of 19** | **84.5 %** | 0 |
-| … excluding 5 Oct | v2 | 18 | 218 MW (2.52 %) | 376 MW | 17 of 18 | | |
+| Period | Version | Days | Model MAE | Baseline MAE | Model MAPE | Beat baseline | Mean bias | In 80 % range |
+|---|---|---|---|---|---|---|---|---|
+| 19–22 Sep | v1 | 4 | 220 MW | 244 MW | 2.66 % | 2 of 4 | −151 MW | – |
+| 23 Sep – 13 Oct | v2 | 22 | 249 MW | 441 MW | 2.76 % | 20 of 22 | −189 MW | 83.1 % |
+| 14 Oct – 25 Nov | **v3** | 39 | 269 MW | 651 MW | **2.55 %** | **37 of 39** | **−38 MW** | 78.0 % |
+| fallback days | baseline | 2 | 685 MW | 685 MW | 6.66 % | 0 of 2 | −233 MW | – |
 
-Scores are kept per version, so versions are never mixed. Zero fallback days and zero skipped days so far: every run has published a model forecast. The range is holding slightly wide – 84.5 % of hours inside an 80 % band – which is the safe direction to be wrong in. One day, 5 October, accounts for 25 MW of the 19-day v2 average on its own; it is written up under Incidents rather than quietly dropped.
+**v3 did what it was built to do.** Mean bias fell from −189 MW to −38 MW, a five-fold reduction, and the applied shift ranged from −150 to +117 MW across 40 runs – so it is genuinely tracking the bias in both directions, not a constant adder wearing a filter's clothes. MAPE improved from 2.76 % to 2.55 % even though v3 has run through the harder half of the year.
 
-**The honest caveat on all of this:** only 4 of those 19 forecasts were issued before the day-ahead gate closure. The rest were published before the day they predict, so the track record is real, but too late to have been bid into the market. That is a limitation of free hosted cron rather than of the model, it could not be fixed by scheduling earlier without a worse trade-off, and it is written up in full under Incidents.
+Raw MAE went *up* (249 → 269 MW) and that is seasonal, not a regression: the naive baseline over the same shift went from 441 to 651 MW, because November load swings far more week to week than October's does. The model's margin over the baseline widened from 1.8× to 2.4×.
+
+Two things are going the wrong way and are written up under **Open problems** below: the 80 % range is now slightly *too narrow* rather than too wide, and it collapses on exactly the days the model misses worst. Scores are kept per version, so versions are never mixed.
+
+**The honest caveat on all of this:** 18 of 69 published forecasts were issued before the day-ahead gate closure – better than the 4 of 19 reported in October, only because winter gate closure is 11:00 UTC instead of 10:00 and buys an extra hour against GitHub's queue delay. The rest were published before the day they predict, so the track record is real, but too late to have been bid into the market. That is a limitation of free hosted cron rather than of the model, and it is written up in full under Incidents.
 
 ### Backtest
 
@@ -169,6 +174,39 @@ The first week is clean and then it steps down and stays down. The gap is also f
 
 That is a case for a bias filter rather than a retune, and it is also why the filter earns 9.4 % here against 2.1 % on the historical years. The honest limitation: at damping 0.4 the filter removes about a third of a step like this (−130 MW to −83 MW), and a stronger setting would remove more – damping 1.0 takes the live bias to −29 MW. It is not chosen because it is worse on the selection periods, where there is no step to chase and a heavy correction only adds noise. If the step turns out to be permanent, the right fix is not a heavier filter but giving the model a recent-level feature, which lost on historical data for the same reason: those years have no step in them. The live scoring will settle it.
 
+## Open problems
+
+Two weaknesses the live record has exposed that the backtest did not. Both are real, neither is fixed, and they are the reason a v4 is worth building rather than more tuning.
+
+### 1. The 80 % range is too narrow when it matters most
+
+Live coverage by week of the v3 period:
+
+| Week of | 12 Oct | 19 Oct | 26 Oct | 2 Nov | 9 Nov | 16 Nov | 23 Nov |
+|---|---|---|---|---|---|---|---|
+| Hours inside the 80 % range | 88.5 % | 83.4 % | 88.3 % | 88.1 % | **54.8 %** | 78.5 % | **63.9 %** |
+
+It averages 78.0 %, which looks like a well-calibrated 80 % band. The average hides the shape: the range is comfortably wide on ordinary weeks and falls apart on bad ones. On the three worst days it held 1 to 2 hours out of 24.
+
+The cause is structural. The range is built from out-of-sample errors over 2023–2026, bucketed by season, time of day and day type. That tells it how wrong the model usually is in a November evening. It cannot tell it how wrong the model is *on a day it is about to badly misjudge*, because the band is sized before the forecast is made and does not depend on anything about that particular day. An interval that is widest when the model is least sure would need a conditional estimate of uncertainty, which this is not.
+
+### 2. The model lags the heating ramp, and the bias filter makes it worse on those days
+
+The four worst v3 days are all under-forecasts on steeply rising load, and the weather forecast was not at fault on any of them:
+
+| Day | Error | Load vs the day before | Temp. forecast error |
+|---|---|---|---|
+| 12 Nov | **−580 MW** | +702 MW | −0.25 °C |
+| 13 Nov | **−864 MW** | +499 MW | +0.13 °C |
+| 24 Nov | **−689 MW** | +587 MW | +0.54 °C |
+| 15 Nov | **+411 MW** | −395 MW | −0.35 °C |
+
+SMHI was accurate to within 0.55 °C every time, so this is not a weather miss. It is the load lags: `load_lag_48` and `load_lag_168` carry about 64 % of the model's gain between them, and during a seasonal ramp a two-day-old and a week-old load reading are both systematically too low. The model inherits that lag. The last row is the same mechanism in reverse — when load falls back, it over-forecasts.
+
+The bias filter actively hurts here. On 12 and 13 November it applied **+117 MW** — pushing the forecast *down* — while the model was already 580 to 864 MW short, because it was still reacting to the +197 MW over-forecast of 11 November. The filter assumes the bias is a slowly-moving level offset. In a ramp the error alternates sign with the day-over-day change, and a 3-day median chases it one step behind. It is a net win over 39 days (bias −189 → −38 MW) and a liability on the handful of days that dominate the error.
+
+Both problems point the same way: the model has no notion of the recent *trajectory* of load, only of its level 48 and 168 hours ago. That is the thing a v4 should address, and it is a better argument for a sequence model than "try deep learning" is.
+
 ## Data decisions
 
 - **All timestamps are UTC.** Swedish local time is only used to derive calendar features.
@@ -194,6 +232,16 @@ Beating a 7 h 45 m delay would mean firing the first trigger at 02:07 UTC, and t
 What happened is that actual load spiked to **12,008 MW at 11:00 local**, against a forecast of 9,394 MW and a typical early-October Monday peak of 9,700–10,700 MW in the morning or evening. The excursion lasted about three hours (09:00–12:00 local, +1.3 to +2.6 GW), then load returned to normal for the rest of the day; the surrounding Monday peaks were 9,742 MW on 28 Sep and 10,738 MW on 12 Oct, both at the usual times. A 25 % three-hour jump at midday on a mild day (14 °C) is not a demand shape any weather-driven model produces, and the value is in ENTSO-E's settled data, so it is not the preliminary-value problem either.
 
 No code change: nothing in the pipeline failed and nothing would have predicted it. It is recorded here because a single day moved the 19-day average by 25 MW, and the headline numbers above show the record with and without it. The 80 % range is doing its job by being visibly wrong on a day like this rather than quietly wide enough to swallow it.
+
+**25 Oct 2026: no forecast published at all — a DST bug.** The one day since launch with no prediction on record. On the autumn clock change the job ran three times and logged `exists` every time, having decided the target day was 25 October — the day that had already been published — instead of the 26th.
+
+`target_hours()` derived "tomorrow" as local midnight plus `pd.Timedelta(days=1)`. On a tz-aware timestamp that adds an absolute 24 hours, and the autumn changeover day is 25 hours long, so midnight + 24 h is still 23:00 on the same date. The function's own docstring claimed it handled the 23/25-hour days; `start` and `end` did, because they stepped the date, but the line deriving the date itself did not. The spring changeover was unaffected, which is why eight months of runs and two prior DST tests never caught it.
+
+Fixed by stepping the calendar date (`date() + timedelta(days=1)`). Verified against every changeover from 2025 to 2027, and against two years of simulated daily runs: 730 runs now yield 730 distinct target days with no duplicates and no gaps. Previously this would have dropped one forecast every autumn, silently — the job reported success each time, because publishing nothing is indistinguishable from "already published" in the run log.
+
+**27 Oct and 17 Nov 2026: baseline fallbacks on stale load data.** Two days where ENTSO-E had not published enough recent load for the 48-hour lag, so the job fell back to the seasonal-naive baseline, as designed. The 17 November case is unambiguous: load ended 2026-11-15 10:00 UTC at a run 27 hours later. The 27 October case is not — the series reached 2026-10-26 05:00 UTC, which should have covered the lag, so the gap was probably interior rather than a truncated tail, plausibly around the duplicated 02:00 hour of the clock change the day before. The data has since been backfilled by the rolling 3-day re-fetch, so it can no longer be reconstructed.
+
+That it cannot be reconstructed is itself the finding: the run log recorded only where the series ended, which does not distinguish a short tail from a hole in the middle. The note now names the missing hours and how many of the target day's 24 lack their lag, so the next occurrence is diagnosable from the log alone. No change to the fallback behaviour — it did the right thing both times.
 
 _Any other day the job falls back or skips gets a short write-up here: what failed, what the job did, and what changed._
 
